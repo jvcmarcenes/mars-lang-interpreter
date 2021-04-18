@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "4Tq1T1pDsiZUI79qybPP3biP2m49TlYg0vl+foTk3ZtFxJBumxR5Qk4CEdLpCo7IbiDRtor9iemNwsjjBWFTeQ==",
+  "success": true,
+  "projectFilePath": "E:\\joao\\code\\fsharp-pseudolang-interpreter\\fsharp-pseudolang-interpreter.fsproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\User\\.nuget\\packages\\fparsec\\1.1.1\\fparsec.1.1.1.nupkg.sha512",
+    "C:\\Users\\User\\.nuget\\packages\\fsharp.core\\5.0.0\\fsharp.core.5.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}
