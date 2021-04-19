@@ -6,14 +6,9 @@ module Lang
   open Railway
 
   module Model =
-    type VarType = Int | Float | String | Array | Any
+    type VarType = Int | Float | String | Array | Any // not in use yet
 
     type Identifier = string
-
-    type Scope = {
-      parent: Option<Scope>
-      self: Map<Identifier, obj>
-    }
 
     type ParamList = string list // alias for procedure and function parameters
 
@@ -34,8 +29,7 @@ module Lang
       | BooleanLiteral of bool
       | ArrayLiteral of Expression list
       | Read
-      | ReadInt
-      | ReadFloat
+      | ReadNumber
       | Random of Expression
       | VarReference of Identifier
       | ArrayAccess of Identifier * Expression
@@ -43,6 +37,7 @@ module Lang
       | Binary of BinaryOperation * Expression * Expression
       | Group of Expression
       | Empty
+      | FunctionCall of Identifier * Expression list
 
     type Statement = // types os statements, get executed
       | Comment
@@ -56,21 +51,37 @@ module Lang
       | End
       | ProcedureDefinition of Identifier * ParamList * Block
       | ProcedureCall of Identifier * Expression list
+      | FunctionDefintion of Identifier * ParamList * Block
+      | Return of Expression
 
     and Block = Statement list // type alias for a list of statements
 
-    type Procedure = {
+    type Scope = 
+      { 
+        parent: Option<Scope>
+        self: Map<Identifier, obj>
+        quit: Option<Expression> // aaa I hate having "quit" on this record type
+      }
+      static member Default = {
+        parent = None
+        self = Map.empty
+        quit = None
+      }
+
+    type Method = {
       statements: Block
       plist: ParamList
     }
 
-    type Program = {
-      statements: Block
-      space: Scope // Program very likely doesn't need to keep VariableScope
-    }
-
   module Parser =
     open Model
+
+    // 
+    let (<?|>) p1 p2 = attempt p1 <|> p2
+
+    let rec attemptChoice = function
+      | p1::tail -> p1 <?|> attemptChoice tail
+      | [] -> pzero
 
     // helper method for statements with more than 3 values
     let fix f ((a, b), c) = f (a, b, c)
@@ -107,30 +118,46 @@ module Lang
     let intLiteral = pint32 |>> fun i -> IntLiteral (float i)
     let floatLiteral = pfloat |>> FloatLiteral
     let boolLiteral = stringReturn "true" true <|> stringReturn "false" false |>> BooleanLiteral
+
     let arrayLiteral = lsbr >>. sepBy expr comma .>> rsbr |>> ArrayLiteral
 
     let read = stringReturn "read" Read
-    let readint = stringReturn "readint" ReadInt
-    let readfloat = stringReturn "readfloat" ReadFloat
+    let readnumber = stringReturn "readnumber" ReadNumber
     let random = skipString "random" >>. ws1 >>. expr |>> Random
 
-    let varRef = id .>>. opt (lsbr >>. expr .>> rsbr) |>> fun (i, a) -> match a with Some a -> ArrayAccess (i, a) | None -> VarReference i
+    let varReference = id |>> VarReference
+    let arrayAccess = id .>> lsbr .>>. expr .>> rsbr |>> ArrayAccess
+
+    // let methodcaller = (ws1 >>. sepBy1 expr (followedBy expr)) <?|> (stringReturn "!" []) // this method caller should not parse expr as funccalls 
+    let methodcaller = (skipChar '!' >>. sepBy expr (followedBy expr))
+
+    let funccall = id .>>. methodcaller |>> FunctionCall
 
     let group = lpar >>. expr .>> rpar |>> Group
 
-    opp.TermParser <- ws >>. choice [
-        stringLiteral; floatLiteral; intLiteral; boolLiteral; arrayLiteral; 
-        readint; readfloat; read; random; varRef; group
-      ] .>> ws
+    opp.TermParser <- ws >>. attemptChoice [
+      stringLiteral <??> nameof stringLiteral
+      floatLiteral <??> nameof floatLiteral
+      intLiteral <??> nameof intLiteral
+      boolLiteral <??> nameof boolLiteral
+      arrayLiteral <??> nameof arrayLiteral
+      readnumber <??> nameof readnumber
+      read <??> nameof read
+      random <??> nameof random
+      arrayAccess <??> nameof arrayAccess
+      funccall <??> nameof funccall
+      varReference <??> nameof varReference // VarReference must come after arrayAccess and funccall due to parser conflicts
+      group <??> nameof group
+    ] .>> ws
 
     let unary op x = Unary (op, x)
     let binary op x y = Binary (op, x, y)
 
-    opp.AddOperator <| InfixOperator("+", ws, 3, Associativity.Left, binary Add)
-    opp.AddOperator <| InfixOperator("-", ws, 3, Associativity.Left, binary Sub)
-    opp.AddOperator <| InfixOperator("*", ws, 4, Associativity.Left, binary Mul)
-    opp.AddOperator <| InfixOperator("/", ws, 4, Associativity.Left, binary Div)
-    opp.AddOperator <| InfixOperator("%", ws, 3, Associativity.Left, binary Mod)
+    opp.AddOperator <| InfixOperator("+", ws, 4, Associativity.Left, binary Add)
+    opp.AddOperator <| InfixOperator("-", ws, 4, Associativity.Left, binary Sub)
+    opp.AddOperator <| InfixOperator("*", ws, 5, Associativity.Left, binary Mul)
+    opp.AddOperator <| InfixOperator("/", ws, 5, Associativity.Left, binary Div)
+    opp.AddOperator <| InfixOperator("%", ws, 4, Associativity.Left, binary Mod)
     opp.AddOperator <| InfixOperator("&&", ws, 1, Associativity.None, binary And)
     opp.AddOperator <| InfixOperator("||", ws, 1, Associativity.None, binary Or)
     opp.AddOperator <| InfixOperator("==", ws, 2, Associativity.None, binary Equals)
@@ -146,8 +173,9 @@ module Lang
 
     let equassign = stringReturn "=" Set
     let addassign = stringReturn "+=" PlusEquals
+    let minassign = stringReturn "-=" MinusEquals
 
-    let assignops = choice [equassign; addassign]
+    let assignops = attemptChoice [equassign; addassign; minassign]
 
     // Statements
     let statement, statementRef = createParserForwardedToRef<Statement, unit>()
@@ -160,7 +188,12 @@ module Lang
     let write = skipString "write" >>. ws1 >>. expr |>> Write
 
     let definition = skipString "let" >>. ws1 >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr |>> Definition
-    let assignment = varRef .>> ws .>>. assignops .>> ws .>>. expr |>> fun ((i, o), e) -> Assignment (o, i, e)
+    let assignment = (id .>>. (opt (lsbr >>. expr .>>  rsbr))) .>> ws .>>. assignops .>> ws .>>. expr |>> fun (((i, a), o), e) ->
+      let id = 
+        match a with
+        | Some ae -> ArrayAccess (i, ae)
+        | None -> VarReference i
+      Assignment (o, id, e)
 
     let sleep = skipString "sleep" >>. ws1 >>. intLiteral |>> Sleep
 
@@ -168,25 +201,35 @@ module Lang
 
     let loop = skipString "loop" >>. ws1 >>. id .>> ws1 .>>. expr .>> nl .>>. blockEndBy endtag |>> fix Loop 
 
-    let elseblock = skipString "else" >>. nl >>. blockEndBy endtag
-    let ifstmt = skipString "if" >>. ws1 >>. expr .>> nl .>>. blockEndBy (endtag <|> followedByString "else") .>>. (elseblock <|> preturn []) |>> fix If
+    let ifstmt, ifstmtRef = createParserForwardedToRef<Statement, unit>()
+    let elseblock = skipString "else" >>. ((ws1 >>. ifstmt |>> fun s -> [s]) <|> (ws >>. nl >>. blockEndBy endtag))
+    do ifstmtRef := skipString "if" >>. ws1 >>. expr .>> nl .>>. blockEndBy (endtag <|> followedByString "else") .>>. (elseblock <|> preturn []) |>> fix If
 
     let procdef = skipString "procedure" >>. ws1 >>. id .>>. ((ws1 >>. sepBy id ws1) <|> preturn []) .>> nl .>>. blockEndBy endtag |>> fix ProcedureDefinition
-    let proccall = id .>>. ( stringReturn "!" [] <|> (ws1 >>. sepBy expr ws1)) |>> ProcedureCall
+    let proccall = id .>>. methodcaller |>> ProcedureCall
 
-    do statementRef := spaces >>. choice [writeline; write; comment; definition; procdef; proccall; loop; ifstmt; sleep; assignment] .>> spaces .>> optional (followedByL eof "end of file")
+    let funcdef = skipString "function" >>. ws1 >>. id .>>. ((ws1 >>. sepBy id ws1) <|> preturn []) .>> nl .>>. blockEndBy endtag |>> fix FunctionDefintion
+
+    let ret = skipString "return" >>. ws1 >>. expr |>> Return
+
+    do statementRef := spaces >>. attemptChoice [
+          writeline <??> nameof writeline
+          write <??> nameof write
+          comment <??> nameof comment
+          ret <??> nameof ret
+          sleep <??> nameof sleep
+          definition <??> nameof definition
+          funcdef <??> nameof funcdef
+          procdef <??> nameof procdef
+          loop <??> nameof loop
+          ifstmt  <??> nameof ifstmt
+          assignment <??> nameof assignment
+          proccall <??> nameof proccall
+        ] .>> spaces .>> optional (followedByL eof "end of file")
     //
 
     // Program parsing
-    let createProgram s = {
-      statements = s
-      space = {
-        parent = None
-        self = Map.empty
-      }
-    }
-
-    let program = blockEndBy eof |>> createProgram
+    let program = blockEndBy eof
 
     let parse path =
       match runParserOnFile program () path Text.Encoding.UTF8 with
@@ -221,50 +264,75 @@ module Lang
     let rec getvar id scope = 
       recscope id scope (fun _ -> Map.find id scope.self) (fun p -> getvar id p) (fun _ -> failwithf $"{id} is not defined")
 
-    let rec evaluate expr (scope: Scope) =
-      match expr with
-      | StringLiteral s -> s :> obj
-      | IntLiteral n -> n :> obj
-      | FloatLiteral n -> n :> obj
-      | BooleanLiteral b -> b :> obj
-      | ArrayLiteral arr -> arr |> List.map (fun expr -> evaluate expr scope) :> obj
-      | VarReference id -> getvar id scope
-      | ArrayAccess (id, expr) -> 
-        let index = int32 (evaluate expr scope :?> float)
-        (getvar id scope :?> obj list).[index]
-      | Read -> Console.ReadLine() :> obj
-      | ReadInt -> int32 (Console.ReadLine ()) :> obj
-      | ReadFloat -> float (Console.ReadLine ()) :> obj
-      | Random expr -> (new Random()).Next() % (evaluate expr scope :?> int) :> obj
-      | Unary (op, x) ->
-        let _x = evaluate x scope
-        match op with
-        | NumberNegation -> -(_x :?> int) :> obj
-        | Identity -> _x
-        | BooleanNegation -> not (_x :?> bool) :> obj
-      | Binary (op, l, r) ->
-        let _l = evaluate l scope
-        let _r = evaluate r scope
-        match op with
-        | Add -> addop _l _r
-        | Sub -> oper<float, float> (-) _l _r
-        | Mul -> oper<float, float> (*) _l _r
-        | Div -> oper<float, float> (/) _l _r
-        | Mod -> oper<float, float> (%) _l _r
-        | And -> oper<bool, bool> (&&) _l _r
-        | Or -> oper<bool, bool> (||) _l _r
-        | Equals -> oper<obj, bool> (=) _l _r
-        | NotEquals -> oper<obj, bool> (<>) _l _r
-        | GreaterThan -> oper<IComparable, bool> (>) _l _r
-        | GreaterThanOrEquals -> oper<IComparable, bool> (>=) _l _r
-        | LesserThan -> oper<IComparable, bool> (<) _l _r
-        | LesserThanOrEquals -> oper<IComparable, bool> (<=) _l _r
-      | Group expr  -> evaluate expr scope
-      | Empty -> "" :> obj
-
-    let evaluateToInt expr space = int32 (evaluate expr space :?> float)
-
     let rec execute stmt (scope: Scope) =
+
+      let runBlock block scope =
+        let rec fold block scope =
+          match block with
+          | head::tail -> 
+            let _scope = execute head scope
+            match _scope.quit with
+            | Some _ -> _scope
+            | None -> fold tail _scope
+          | [] -> scope
+        fold block scope
+
+      let rec evaluate expr (scope: Scope) =
+        match expr with
+        | StringLiteral s -> s :> obj
+        | IntLiteral n -> n :> obj
+        | FloatLiteral n -> n :> obj
+        | BooleanLiteral b -> b :> obj
+        | ArrayLiteral arr -> arr |> List.map (fun expr -> evaluate expr scope) :> obj
+        | VarReference id -> getvar id scope
+        | ArrayAccess (id, expr) -> 
+          let index = int32 (evaluate expr scope :?> float)
+          (getvar id scope :?> obj list).[index]
+        | Read -> Console.ReadLine() :> obj
+        | ReadNumber -> float (Console.ReadLine ()) :> obj
+        | Random expr -> (new Random()).Next() % (evaluate expr scope :?> int) :> obj
+        | Unary (op, x) ->
+          let _x = evaluate x scope
+          match op with
+          | NumberNegation -> -(_x :?> int) :> obj
+          | Identity -> _x
+          | BooleanNegation -> not (_x :?> bool) :> obj
+        | Binary (op, l, r) ->
+          let _l = evaluate l scope
+          let _r = evaluate r scope
+          match op with
+          | Add -> addop _l _r
+          | Sub -> oper<float, float> (-) _l _r
+          | Mul -> oper<float, float> (*) _l _r
+          | Div -> oper<float, float> (/) _l _r
+          | Mod -> oper<float, float> (%) _l _r
+          | And -> oper<bool, bool> (&&) _l _r
+          | Or -> oper<bool, bool> (||) _l _r
+          | Equals -> oper<obj, bool> (=) _l _r
+          | NotEquals -> oper<obj, bool> (<>) _l _r
+          | GreaterThan -> oper<IComparable, bool> (>) _l _r
+          | GreaterThanOrEquals -> oper<IComparable, bool> (>=) _l _r
+          | LesserThan -> oper<IComparable, bool> (<) _l _r
+          | LesserThanOrEquals -> oper<IComparable, bool> (<=) _l _r
+        | Group expr  -> evaluate expr scope
+        | Empty -> "" :> obj
+        | FunctionCall (id, elist) ->
+          let func = scope |> getvar id :?> Method
+          if List.length func.plist = List.length elist then
+            let innerScope = {
+              parent = Some scope
+              self = func.plist |> List.mapi (fun i v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq
+              quit = None
+            }
+            let _scope = runBlock func.statements innerScope
+            match _scope.quit with
+            | Some rexpr -> evaluate rexpr _scope
+            | None -> failwithf $"function did not return a value"
+          else
+            failwithf $"number of parameters passed to \"{id}\" call did not match expected number of params"
+
+      let evaluateToInt expr space = int32 (evaluate expr space :?> float)
+
       match stmt with
       | Comment -> scope
       | Write expr -> printf $"{evaluate expr scope}"; scope
@@ -278,8 +346,9 @@ module Lang
           | PlusEquals -> 
             let v = getvar id scope
             match v with
-            | :? int | :? float as _v -> updvar id (_v :?> float + (evaluate expr scope :?> float) :> obj) scope
             | :? (obj list) as _v -> updvar id (List.append _v [evaluate expr scope]) scope
+            | :? int | :? float | :? string as _v -> updvar id (addop _v (evaluate expr scope)) scope
+            // | :? string as _v -> updvar id (_v + (evaluate expr scope :?> string) :> obj) scope
             | _ -> failwithf $"Invalid operator (+=) for type {v.GetType()}"
           | MinusEquals -> scope
         | ArrayAccess (id, iexpr) ->
@@ -325,21 +394,30 @@ module Lang
           plist = plist
         }
       | ProcedureCall (id, elist) ->
-        let proc = scope |> getvar id :?> Procedure
+        let proc = scope |> getvar id :?> Method
         if List.length proc.plist = List.length elist then
           let innerScope = {
             parent = Some scope
             self = proc.plist |> List.mapi (fun i v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq
+            quit = None
           }
-          proc.statements |> List.fold (fun s b -> execute b s) innerScope |> ignore
-          scope
+          let _scope = runBlock proc.statements innerScope
+          match _scope.parent with
+          | Some p -> p
+          | None -> failwithf $"somehow the procedure did not have a parent, this exception should never be raised"
         else
           failwithf $"number of parameters passed to \"{id}\" call did not match expected number of params"
-    
+      | FunctionDefintion (id, plist, block) ->
+        scope |> addvar id {
+          statements = block
+          plist = plist
+        }
+      | Return expr -> { scope with quit = Some expr }
+
     let run program =
       try
-        List.fold (fun space block -> execute block space) program.space program.statements |> ignore
-        Success ()
+        List.fold (fun space block -> execute block space) Scope.Default program
+        |> Success
       with
       | err -> Failure ("[execution]: " + err.ToString())
 
@@ -347,8 +425,16 @@ module Lang
       | Success _ -> printfn "\nProgram finished execution without errors."
       | Failure fail -> printfn $"{fail}"
 
+    let debug res =
+      match res with
+      | Success succ -> printfn $"[debug]: {succ}"
+      | Failure _ -> ()
+      res
+
     let interpret path =
       path
-      |> parse
-      |> bind run
+      |> parse 
+      |> debug
+      |> bind run 
+      // |> debug
       |> finish
