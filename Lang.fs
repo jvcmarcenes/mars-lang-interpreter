@@ -22,7 +22,7 @@ module Lang
       | And | Or // boolean operators
       | GreaterThan | GreaterThanOrEquals | LesserThan | LesserThanOrEquals //comparison operators
 
-    type Expression = // types of expression, evaluates to a value
+    type Expression =
       | StringLiteral of string
       | IntLiteral of float
       | FloatLiteral of float
@@ -39,7 +39,7 @@ module Lang
       | Empty
       | FunctionCall of Identifier * Expression list
 
-    type Statement = // types os statements, get executed
+    type Statement =
       | Comment
       | Write of Expression
       | WriteLine of Expression
@@ -76,9 +76,9 @@ module Lang
 
       let updscope f scope = { scope with self = f scope.self }
 
-      let recscope id scope act sact fact =
+      let recscope id scope act pact fact =
         if hasvar id scope then act ()
-        else match scope.parent with Some p -> sact p | None -> fact ()
+        else match scope.parent with Some p -> pact p | None -> fact ()
 
       let addvar id value scope = 
         if hasvar id scope then failwithf $"{id} is already defined" 
@@ -118,7 +118,7 @@ module Lang
       | p1::tail -> p1 <?|> attemptChoice tail
       | [] -> pzero
 
-    // helper method for statements with more than 3 values
+    // helper method for statements with 3 values
     let fix f ((a, b), c) = f (a, b, c)
 
     // Characters Constructs
@@ -139,7 +139,7 @@ module Lang
 
     let endtag = skipString "end"
 
-    let empty = followedByNewline <|> notFollowedByEof >>% Empty
+    let empty = followedByNewline <|> followedBy eof >>% Empty
     //
 
     let id = identifier (new IdentifierOptions()) |>> fun s -> s
@@ -472,8 +472,13 @@ module Lang
           | err -> Failure $"[module execution]: {err.ToString()}"
         )
         |> (function
-          | Success succ -> { scope with parent = Some succ }
-          | Failure fail -> failwithf $"[module execution]: {fail}"
+          | Success succ -> 
+            let par = 
+              match scope.parent with
+              | Some p -> { p with self = Map.fold (fun cur key value -> Map.add key value cur) p.self succ.self }
+              | None -> succ
+            { scope with parent = Some par }
+          | Failure fail -> failwithf $"{fail}"
         )
 
     let run program =
@@ -496,7 +501,7 @@ module Lang
     let interpret path =
       path
       |> parse 
-      |> debug
+      // |> debug
       |> bind run 
       // |> debug
       |> finish

@@ -3,5 +3,6 @@ todo.txt
 
 .fake
 .ionide
+.vscode
 bin
 obj
