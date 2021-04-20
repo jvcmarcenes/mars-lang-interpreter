@@ -1,0 +1,11 @@
+use "./math.mars"
+
+procedure main
+
+  writeline "Hello from Mars!"
+
+  writeline "pi is approximately equal to " + pi
+
+end
+
+main!

@@ -463,7 +463,7 @@ module Lang
         }
       | Return expr -> { scope with quit = Some expr }
       | Use path ->
-        $"./tests/{path}.txt" // TODO make this path relative to the program file, not to the interpreter
+        $"{path}" // TODO make this path relative to the program file, not to the interpreter
         |> parseModule
         |> bind (fun m -> // TODO push "run" function above so I can use it here
           try

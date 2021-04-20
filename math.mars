@@ -1,0 +1,28 @@
+module
+
+let pi = 3.1415926535897938
+
+function pow b e
+  let ret = 1
+  loop i e
+    ret = ret * b
+  end
+  return ret
+end
+
+function isPrime n
+  loop i n/2+2
+    if n % (i+2) == 0
+      return false
+    end
+  end
+  return true
+end
+
+function factorial n
+  let fac = 1
+  loop i n-1
+    fac = fac * (i + 1)
+  end
+  return fac
+end

@@ -2,6 +2,6 @@
 [<EntryPoint>]
 let main argv =
 
-  Lang.Interpreter.interpret $"./tests/{argv.[0]}.txt"
+  Lang.Interpreter.interpret $"{argv.[0]}"
 
   0
