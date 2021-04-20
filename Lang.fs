@@ -53,20 +53,55 @@ module Lang
       | ProcedureCall of Identifier * Expression list
       | FunctionDefintion of Identifier * ParamList * Block
       | Return of Expression
+      | Use of string
 
     and Block = Statement list // type alias for a list of statements
 
-    type Scope = 
-      { 
-        parent: Option<Scope>
-        self: Map<Identifier, obj>
-        quit: Option<Expression> // aaa I hate having "quit" on this record type
-      }
-      static member Default = {
+    type Scope = { 
+      parent: Option<Scope>
+      self: Map<Identifier, obj>
+      quit: Option<Expression> // aaa I hate having "quit" on this record type
+    }
+
+    module Scope =
+
+      let defaultScope = {
         parent = None
         self = Map.empty
         quit = None
       }
+
+      let hasvar id scope = 
+        Map.containsKey id scope.self
+
+      let updscope f scope = { scope with self = f scope.self }
+
+      let recscope id scope act sact fact =
+        if hasvar id scope then act ()
+        else match scope.parent with Some p -> sact p | None -> fact ()
+
+      let addvar id value scope = 
+        if hasvar id scope then failwithf $"{id} is already defined" 
+        else updscope (Map.add id value) scope
+
+      let remvar id scope = 
+        updscope (Map.remove id) scope
+
+      let rec updvar id value scope = 
+        let changer = function
+          | Some _ -> Some value
+          | None -> failwithf $"{id} is not defined"
+        let upd = Map.change id changer
+        let act () = updscope upd scope
+        let pact p = updvar id value p
+        let fact () = failwithf $"{id} is not defined"
+        recscope id scope act pact fact
+
+      let rec getvar id scope = 
+        let act () = Map.find id scope.self
+        let pact p = getvar id p
+        let fact () = failwithf $"{id} is not defined"
+        recscope id scope act pact fact
 
     type Method = {
       statements: Block
@@ -212,6 +247,8 @@ module Lang
 
     let ret = skipString "return" >>. ws1 >>. expr |>> Return
 
+    let _use = skipString "use" >>. ws1 >>. quote >>. manyCharsTill anyChar quote |>> Use
+
     do statementRef := spaces >>. attemptChoice [
           writeline <??> nameof writeline
           write <??> nameof write
@@ -225,7 +262,17 @@ module Lang
           ifstmt  <??> nameof ifstmt
           assignment <??> nameof assignment
           proccall <??> nameof proccall
+          _use <??> "use"
         ] .>> spaces .>> optional (followedByL eof "end of file")
+    //
+
+    // Module
+    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill (spaces >>. (funcdef <|> procdef <|> definition <|> comment) .>> spaces) eof
+
+    let parseModule path =
+      match runParserOnFile moduleParser () path Text.Encoding.UTF8 with
+      | ParserResult.Success (res, _, _) -> Success res
+      | ParserResult.Failure (err, _, _) -> Failure ("[module parser]: " + err)
     //
 
     // Program parsing
@@ -238,6 +285,7 @@ module Lang
     
   module Interpreter =
     open Model
+    open Model.Scope
     open Parser
 
     let addop (l: obj) (r: obj) =
@@ -253,19 +301,7 @@ module Lang
       | (:? 't as _l), (:? 't as _r) -> f _l _r :> obj
       | _ -> failwith $"Invalid operation for types {l.GetType()} and {r.GetType()}"
 
-    let hasvar id scope = Map.containsKey id scope.self
-    let recscope id scope act sact fact =
-      if hasvar id scope then act ()
-      else match scope.parent with Some p -> sact p | None -> fact ()
-    let addvar id value scope = if hasvar id scope then failwithf $"{id} is already defined" else { scope with self = Map.add id (value :> obj) scope.self}
-    let remvar id scope = { scope with self = Map.remove id scope.self }
-    let rec updvar id value scope = 
-      recscope id scope (fun _ -> { scope with self = Map.change id (function Some _ -> Some (value :> obj) | None -> failwithf $"{id} is not defined") scope.self }) (fun p -> updvar id value p) (fun _ -> failwithf $"{id} is not defined")
-    let rec getvar id scope = 
-      recscope id scope (fun _ -> Map.find id scope.self) (fun p -> getvar id p) (fun _ -> failwithf $"{id} is not defined")
-
     let rec execute stmt (scope: Scope) =
-
       let runBlock block scope =
         let rec fold block scope =
           match block with
@@ -350,7 +386,20 @@ module Lang
             | :? int | :? float | :? string as _v -> updvar id (addop _v (evaluate expr scope)) scope
             // | :? string as _v -> updvar id (_v + (evaluate expr scope :?> string) :> obj) scope
             | _ -> failwithf $"Invalid operator (+=) for type {v.GetType()}"
-          | MinusEquals -> scope
+          | MinusEquals -> 
+            let v = getvar id scope
+            match v with
+            | :? (obj list) as _v -> 
+              let rem = evaluateToInt expr scope
+              if rem < 0 || rem >= List.length _v then failwithf $"index out of bounds"
+              let _list = 
+                _v
+                |> List.mapi (fun i v -> i <> rem, v)
+                |> List.filter fst
+                |> List.map snd
+              updvar id _list scope
+            | :? int | :? float as _v -> updvar id (oper<float, float> (-) _v (evaluate expr scope)) scope
+            | _ -> failwithf $"Invalid operator (-=) for type {v.GetType()}"
         | ArrayAccess (id, iexpr) ->
           let index = evaluateToInt iexpr scope
           let arr = getvar id scope :?> obj list
@@ -413,10 +462,23 @@ module Lang
           plist = plist
         }
       | Return expr -> { scope with quit = Some expr }
+      | Use path ->
+        $"./tests/{path}.txt" // TODO make this path relative to the program file, not to the interpreter
+        |> parseModule
+        |> bind (fun m -> // TODO push "run" function above so I can use it here
+          try
+            List.fold (fun s b -> execute b s) defaultScope m |> Success
+          with
+          | err -> Failure $"[module execution]: {err.ToString()}"
+        )
+        |> (function
+          | Success succ -> { scope with parent = Some succ }
+          | Failure fail -> failwithf $"[module execution]: {fail}"
+        )
 
     let run program =
       try
-        List.fold (fun space block -> execute block space) Scope.Default program
+        List.fold (fun space block -> execute block space) defaultScope program
         |> Success
       with
       | err -> Failure ("[execution]: " + err.ToString())
