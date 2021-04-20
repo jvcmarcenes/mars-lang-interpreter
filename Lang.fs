@@ -28,11 +28,13 @@ module Lang
       | FloatLiteral of float
       | BooleanLiteral of bool
       | ArrayLiteral of Expression list
+      | MapLiteral of Map<Identifier, Expression>
       | Read
       | ReadNumber
       | Random of Expression
       | VarReference of Identifier
       | ArrayAccess of Identifier * Expression
+      | MapAccess of Identifier list
       | Unary of UnaryOperation * Expression
       | Binary of BinaryOperation * Expression * Expression
       | Group of Expression
@@ -57,14 +59,20 @@ module Lang
 
     and Block = Statement list // type alias for a list of statements
 
+    type Method = {
+      statements: Block
+      plist: ParamList
+    }
+
     type Scope = { 
       parent: Option<Scope>
       self: Map<Identifier, obj>
       quit: Option<Expression> // aaa I hate having "quit" on this record type
     }
 
-    module Scope =
+    // let objefy x = x :> obj
 
+    module Scope =
       let defaultScope = {
         parent = None
         self = Map.empty
@@ -103,11 +111,6 @@ module Lang
         let fact () = failwithf $"{id} is not defined"
         recscope id scope act pact fact
 
-    type Method = {
-      statements: Block
-      plist: ParamList
-    }
-
   module Parser =
     open Model
 
@@ -125,7 +128,7 @@ module Lang
     let ws = skipMany (skipChar ' ')
     let ws1 = skipMany1 (skipChar ' ')
 
-    let nl = skipMany1 skipNewline
+    let nl = skipMany1 (ws .>> skipNewline .>> ws)
 
     let quote = skipChar '"'
     let comma = skipChar ','
@@ -136,6 +139,8 @@ module Lang
     let rpar = skipChar ')'
     let lsbr = skipChar '['
     let rsbr = skipChar ']'
+    let lbra = skipChar '{'
+    let rbra = skipChar '}'
 
     let endtag = skipString "end"
 
@@ -156,12 +161,15 @@ module Lang
 
     let arrayLiteral = lsbr >>. sepBy expr comma .>> rsbr |>> ArrayLiteral
 
+    let mapLiteral = lbra >>. manyTill (spaces >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr .>> nl) rbra |>> (Map.ofList >> MapLiteral)
+
     let read = stringReturn "read" Read
     let readnumber = stringReturn "readnumber" ReadNumber
     let random = skipString "random" >>. ws1 >>. expr |>> Random
 
     let varReference = id |>> VarReference
     let arrayAccess = id .>> lsbr .>>. expr .>> rsbr |>> ArrayAccess
+    let mapAccess = id .>> skipChar '.' .>>. sepBy1 id (skipChar '.') |>> fun (h, t) -> MapAccess (h::t)
 
     // let methodcaller = (ws1 >>. sepBy1 expr (followedBy expr)) <?|> (stringReturn "!" []) // this method caller should not parse expr as funccalls 
     let methodcaller = (skipChar '!' >>. sepBy expr (followedBy expr))
@@ -176,10 +184,12 @@ module Lang
       intLiteral <??> nameof intLiteral
       boolLiteral <??> nameof boolLiteral
       arrayLiteral <??> nameof arrayLiteral
+      mapLiteral <??> nameof mapLiteral
       readnumber <??> nameof readnumber
       read <??> nameof read
       random <??> nameof random
       arrayAccess <??> nameof arrayAccess
+      mapAccess <??> nameof mapAccess
       funccall <??> nameof funccall
       varReference <??> nameof varReference // VarReference must come after arrayAccess and funccall due to parser conflicts
       group <??> nameof group
@@ -193,14 +203,17 @@ module Lang
     opp.AddOperator <| InfixOperator("*", ws, 5, Associativity.Left, binary Mul)
     opp.AddOperator <| InfixOperator("/", ws, 5, Associativity.Left, binary Div)
     opp.AddOperator <| InfixOperator("%", ws, 4, Associativity.Left, binary Mod)
+
     opp.AddOperator <| InfixOperator("&&", ws, 1, Associativity.None, binary And)
     opp.AddOperator <| InfixOperator("||", ws, 1, Associativity.None, binary Or)
+
     opp.AddOperator <| InfixOperator("==", ws, 2, Associativity.None, binary Equals)
     opp.AddOperator <| InfixOperator("!=", ws, 2, Associativity.None, binary NotEquals)
     opp.AddOperator <| InfixOperator(">", ws, 2, Associativity.None, binary GreaterThan)
     opp.AddOperator <| InfixOperator(">=", ws, 2, Associativity.None, binary GreaterThanOrEquals)
     opp.AddOperator <| InfixOperator("<", ws, 2, Associativity.None, binary LesserThan)
     opp.AddOperator <| InfixOperator("<=", ws, 2, Associativity.None, binary LesserThanOrEquals)
+
     opp.AddOperator <| PrefixOperator("-", ws, 3, true, unary NumberNegation)
     opp.AddOperator <| PrefixOperator("+", ws, 3, true, unary Identity)
     opp.AddOperator <| PrefixOperator("!", ws, 1, true, unary BooleanNegation)
@@ -320,10 +333,20 @@ module Lang
         | FloatLiteral n -> n :> obj
         | BooleanLiteral b -> b :> obj
         | ArrayLiteral arr -> arr |> List.map (fun expr -> evaluate expr scope) :> obj
+        | MapLiteral m -> m |> Map.map (fun _ expr -> evaluate expr scope) :> obj
         | VarReference id -> getvar id scope
         | ArrayAccess (id, expr) -> 
           let index = int32 (evaluate expr scope :?> float)
           (getvar id scope :?> obj list).[index]
+        | MapAccess ids ->
+          match ids with
+          | h::t ->
+            let rec access m b =
+              match b with
+              | f::r -> access (Map.find f (m :?> Map<Identifier, obj>)) r
+              | [] -> m
+            access (getvar h scope :?> Map<Identifier, obj>) t
+          | [] -> failwithf $"wah"
         | Read -> Console.ReadLine() :> obj
         | ReadNumber -> float (Console.ReadLine ()) :> obj
         | Random expr -> (new Random()).Next() % (evaluate expr scope :?> int) :> obj
