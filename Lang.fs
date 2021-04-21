@@ -6,7 +6,7 @@ module Lang
   open Railway
 
   module Model =
-    type VarType = Int | Float | String | Array | Any // not in use yet
+    // not in use yet // type VarType = Int | Float | String | Array | Any
 
     type Identifier = string
 
@@ -23,39 +23,49 @@ module Lang
       | GreaterThan | GreaterThanOrEquals | LesserThan | LesserThanOrEquals //comparison operators
 
     type Expression =
+      // Literals
       | StringLiteral of string
       | IntLiteral of float
       | FloatLiteral of float
       | BooleanLiteral of bool
       | ArrayLiteral of Expression list
       | MapLiteral of Map<Identifier, Expression>
+      | FunctionDefinition of ParamList * Block
+      | ProcedureDefinition of ParamList * Block
+      // Input
       | Read
       | ReadNumber
-      | Random of Expression
-      | VarReference of Identifier
-      | ArrayAccess of Identifier * Expression
-      | MapAccess of Identifier list
+      // Operations
       | Unary of UnaryOperation * Expression
       | Binary of BinaryOperation * Expression * Expression
       | Group of Expression
-      | Empty
+      // Symbol References
+      | VarReference of Identifier
+      | ArrayAccess of Identifier * Expression
+      | MapAccess of Identifier list
       | FunctionCall of Identifier * Expression list
+      // Others
+      | Random of Expression
+      | Empty
 
-    type Statement =
-      | Comment
+    and Statement =
+      // Output
       | Write of Expression
       | WriteLine of Expression
+      // Scope
       | Definition of Identifier * Expression
       | Assignment of AssignmentOperation * Expression * Expression
-      | Loop of Identifier * Expression * Block
-      | If of Expression * Block * Block
-      | Sleep of Expression
-      | End
-      | ProcedureDefinition of Identifier * ParamList * Block
-      | ProcedureCall of Identifier * Expression list
-      | FunctionDefintion of Identifier * ParamList * Block
+      // | ProcedureDefinition of Identifier * ParamList * Block
+      // | FunctionDefintion of Identifier * ParamList * Block
       | Return of Expression
+      // Flow Structure
+      | If of Expression * Block * Block
+      | Loop of Identifier * Expression * Block
+      // Others
+      | ProcedureCall of Identifier * Expression list
       | Use of string
+      | Comment
+      | Sleep of Expression
 
     and Block = Statement list // type alias for a list of statements
 
@@ -117,8 +127,8 @@ module Lang
     // 
     let (<?|>) p1 p2 = attempt p1 <|> p2
 
-    let rec attemptChoice = function
-      | p1::tail -> p1 <?|> attemptChoice tail
+    let rec either = function
+      | p1::tail -> p1 <?|> either tail
       | [] -> pzero
 
     // helper method for statements with 3 values
@@ -149,6 +159,10 @@ module Lang
 
     let id = identifier (new IdentifierOptions()) |>> fun s -> s
 
+    let statement, statementRef = createParserForwardedToRef<Statement, unit>()
+
+    let blockEndBy endp = ws >>. manyTill statement (ws >>. endp)
+
     // Expressions
     let opp = OperatorPrecedenceParser<Expression, _, _>()
 
@@ -160,8 +174,11 @@ module Lang
     let boolLiteral = stringReturn "true" true <|> stringReturn "false" false |>> BooleanLiteral
 
     let arrayLiteral = lsbr >>. sepBy expr comma .>> rsbr |>> ArrayLiteral
-
     let mapLiteral = lbra >>. manyTill (spaces >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr .>> nl) rbra |>> (Map.ofList >> MapLiteral)
+
+    let paramlist = (ws1 >>. sepBy id ws1) <|> (ws >>. preturn []) .>> ws
+    let funcdef = skipString "function" >>. paramlist .>> nl .>>. blockEndBy endtag |>> FunctionDefinition
+    let procdef = skipString "procedure" >>. paramlist .>> nl .>>. blockEndBy endtag |>> ProcedureDefinition
 
     let read = stringReturn "read" Read
     let readnumber = stringReturn "readnumber" ReadNumber
@@ -178,13 +195,15 @@ module Lang
 
     let group = lpar >>. expr .>> rpar |>> Group
 
-    opp.TermParser <- ws >>. attemptChoice [
+    opp.TermParser <- ws >>. either [
       stringLiteral <??> nameof stringLiteral
       floatLiteral <??> nameof floatLiteral
       intLiteral <??> nameof intLiteral
       boolLiteral <??> nameof boolLiteral
       arrayLiteral <??> nameof arrayLiteral
       mapLiteral <??> nameof mapLiteral
+      funcdef <??> nameof funcdef
+      procdef <??> nameof procdef
       readnumber <??> nameof readnumber
       read <??> nameof read
       random <??> nameof random
@@ -223,10 +242,10 @@ module Lang
     let addassign = stringReturn "+=" PlusEquals
     let minassign = stringReturn "-=" MinusEquals
 
-    let assignops = attemptChoice [equassign; addassign; minassign]
+    let assignops = either [equassign; addassign; minassign]
 
     // Statements
-    let statement, statementRef = createParserForwardedToRef<Statement, unit>()
+    // let statement, statementRef = createParserForwardedToRef<Statement, unit>()
 
     let singlecomment = dslash >>. skipManyTill skipAnyChar (skipNewline <|> eof) >>% Comment
     let multicomment = skipString "/*" >>. skipManyTill skipAnyChar (skipString "*/") >>% Comment
@@ -245,7 +264,7 @@ module Lang
 
     let sleep = skipString "sleep" >>. ws1 >>. intLiteral |>> Sleep
 
-    let blockEndBy endp = ws >>. manyTill statement (ws >>. endp)
+    // let blockEndBy endp = ws >>. manyTill statement (ws >>. endp)
 
     let loop = skipString "loop" >>. ws1 >>. id .>> ws1 .>>. expr .>> nl .>>. blockEndBy endtag |>> fix Loop 
 
@@ -253,24 +272,24 @@ module Lang
     let elseblock = skipString "else" >>. ((ws1 >>. ifstmt |>> fun s -> [s]) <|> (ws >>. nl >>. blockEndBy endtag))
     do ifstmtRef := skipString "if" >>. ws1 >>. expr .>> nl .>>. blockEndBy (endtag <|> followedByString "else") .>>. (elseblock <|> preturn []) |>> fix If
 
-    let procdef = skipString "procedure" >>. ws1 >>. id .>>. ((ws1 >>. sepBy id ws1) <|> preturn []) .>> nl .>>. blockEndBy endtag |>> fix ProcedureDefinition
+    // let procdef = skipString "procedure" >>. ws1 >>. id .>>. ((ws1 >>. sepBy id ws1) <|> preturn []) .>> nl .>>. blockEndBy endtag |>> fix ProcedureDefinition
     let proccall = id .>>. methodcaller |>> ProcedureCall
 
-    let funcdef = skipString "function" >>. ws1 >>. id .>>. ((ws1 >>. sepBy id ws1) <|> preturn []) .>> nl .>>. blockEndBy endtag |>> fix FunctionDefintion
+    // let funcdef = skipString "function" >>. ws1 >>. id .>>. ((ws1 >>. sepBy id ws1) <|> preturn []) .>> nl .>>. blockEndBy endtag |>> fix FunctionDefintion
 
     let ret = skipString "return" >>. ws1 >>. expr |>> Return
 
     let _use = skipString "use" >>. ws1 >>. quote >>. manyCharsTill anyChar quote |>> Use
 
-    do statementRef := spaces >>. attemptChoice [
+    do statementRef := spaces >>. either [
           writeline <??> nameof writeline
           write <??> nameof write
           comment <??> nameof comment
           ret <??> nameof ret
           sleep <??> nameof sleep
           definition <??> nameof definition
-          funcdef <??> nameof funcdef
-          procdef <??> nameof procdef
+          // funcdef <??> nameof funcdef
+          // procdef <??> nameof procdef
           loop <??> nameof loop
           ifstmt  <??> nameof ifstmt
           assignment <??> nameof assignment
@@ -280,7 +299,8 @@ module Lang
     //
 
     // Module
-    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill (spaces >>. (funcdef <|> procdef <|> definition <|> comment) .>> spaces) eof
+    // let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill (spaces >>. (funcdef <|> procdef <|> definition <|> comment) .>> spaces) eof
+    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill (spaces >>. (definition <|> comment) .>> spaces) eof
 
     let parseModule path =
       match runParserOnFile moduleParser () path Text.Encoding.UTF8 with
@@ -334,6 +354,16 @@ module Lang
         | BooleanLiteral b -> b :> obj
         | ArrayLiteral arr -> arr |> List.map (fun expr -> evaluate expr scope) :> obj
         | MapLiteral m -> m |> Map.map (fun _ expr -> evaluate expr scope) :> obj
+        | FunctionDefinition (plist, block) -> 
+          {
+            statements = block
+            plist = plist
+          } :> obj
+        | ProcedureDefinition (plist, block) ->
+          {
+            statements = block
+            plist = plist
+          } :> obj
         | VarReference id -> getvar id scope
         | ArrayAccess (id, expr) -> 
           let index = int32 (evaluate expr scope :?> float)
@@ -455,16 +485,15 @@ module Lang
         let b = evaluate expr scope :?> bool
         if b then tblock else fblock 
         |> List.fold (fun spc stmt -> execute stmt spc) scope
-      | End -> scope
       | Sleep expr -> 
         let timeout = evaluate expr scope :?> int
         System.Threading.Thread.Sleep(timeout)
         scope
-      | ProcedureDefinition (id, plist, block) ->
-        scope |> addvar id {
-          statements = block
-          plist = plist
-        }
+      // | ProcedureDefinition (id, plist, block) ->
+      //   scope |> addvar id {
+      //     statements = block
+      //     plist = plist
+      //   }
       | ProcedureCall (id, elist) ->
         let proc = scope |> getvar id :?> Method
         if List.length proc.plist = List.length elist then
@@ -479,11 +508,11 @@ module Lang
           | None -> failwithf $"somehow the procedure did not have a parent, this exception should never be raised"
         else
           failwithf $"number of parameters passed to \"{id}\" call did not match expected number of params"
-      | FunctionDefintion (id, plist, block) ->
-        scope |> addvar id {
-          statements = block
-          plist = plist
-        }
+      // | FunctionDefintion (id, plist, block) ->
+      //   scope |> addvar id {
+      //     statements = block
+      //     plist = plist
+      //   }
       | Return expr -> { scope with quit = Some expr }
       | Use path ->
         $"{path}" // TODO make this path relative to the program file, not to the interpreter
