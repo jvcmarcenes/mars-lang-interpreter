@@ -49,6 +49,7 @@ module Lang
       | FunctionCall of SymbolReference * Expression list
       // Others
       | Random of Expression
+      | Use of string
       | Empty
 
     and Statement =
@@ -62,9 +63,8 @@ module Lang
       // Flow Structure
       | If of Expression * Block * Block
       | Loop of Identifier * Expression * Block
-      // Others
       | ProcedureCall of SymbolReference * Expression list
-      | Use of string // refactor to behave as an expression
+      // Others
       | Comment
       | Sleep of Expression
 
@@ -84,6 +84,7 @@ module Lang
     }
 
     module Scope =
+
       let defaultScope = {
         parent = None
         self = Map.empty
@@ -205,6 +206,8 @@ module Lang
 
     let group = lpar >>. expr .>> rpar |>> Group
 
+    let _use = skipString "use" >>. ws1 >>. quote >>. manyCharsTill anyChar quote |>> Use
+
     opp.TermParser <- ws >>. either [
       stringLiteral <??> "String Literal"
       floatLiteral <??> "Float Litereal"
@@ -217,6 +220,7 @@ module Lang
       readnumber <??> nameof readnumber
       read <??> nameof read
       random <??> nameof random
+      _use <??> "Use Expression"
       funccall <??> "Function Call"
       symbolaccess <??> "Symbol Reference"
       group <??> "Parenthesis Grouping"
@@ -275,8 +279,6 @@ module Lang
 
     let ret = skipString "return" >>. ws1 >>. expr |>> Return
 
-    let _use = skipString "use" >>. ws1 >>. quote >>. manyCharsTill anyChar quote |>> Use
-
     do statementRef := spaces >>. either [
           writeline <??> nameof writeline
           write <??> nameof write
@@ -288,12 +290,13 @@ module Lang
           ifstmt  <??> "If Statement"
           assignment <??> "Symbol Assignment"
           proccall <??> "Procedure Call"
-          _use <??> "Use Statement"
         ] .>> ws // .>> optional (followedByL eof "end of file")
     //
 
     // Module
-    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill (spaces >>. (definition <|> comment) .>> spaces) eof
+    // let blockEndBy endp = ws >>. manyTill (statement .>> (nl <|> followedByEof)) (ws >>. endp)
+
+    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill (spaces >>. (definition <?|> comment) .>> ws .>> (nl <|> followedByEof)) (ws >>. eof)
 
     let parseModule path =
       match runParserOnFile moduleParser () path Text.Encoding.UTF8 with
@@ -314,6 +317,8 @@ module Lang
     open Model.Scope
     open Parser
 
+    let path = ref ""
+
     let addop (l: obj) (r: obj) =
       match l, r with
       | (:? float as _l), (:? float as _r) -> _l + _r :> obj
@@ -326,6 +331,12 @@ module Lang
       match l, r with
       | (:? 't as _l), (:? 't as _r) -> f _l _r :> obj
       | _ -> failwith $"Invalid operation for types {l.GetType()} and {r.GetType()}"
+
+    let rec getparent par ref =
+      match ref with
+      | VarReference _ -> par
+      | ArrayAccess _ -> par
+      | RecursiveAccess (head, tail) -> getparent (Some head) tail
 
     let rec execute stmt scope =
       let runBlock block scope =
@@ -390,9 +401,25 @@ module Lang
         | FunctionCall (ref, elist) ->
           let func = dereference ref scope :?> Method
           if List.length func.plist <> List.length elist then failwithf $"number of parameters passed to \"{id}\" call did not match expected number of params"
-          { parent = Some scope; self = func.plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; quit = None }
+          let parent = 
+            getparent None ref
+            |> (function Some pref -> { parent = Some scope; self = dereference pref scope :?> Map<Identifier, obj>; quit = None } | None -> scope)
+          { parent = Some parent; self = func.plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; quit = None }
           |> runBlock func.statements
           |> (fun _scope -> match _scope.quit with Some rexpr -> evaluate rexpr _scope | None -> failwith $"function \"{id}\" did not return a value")
+        | Use _path ->
+          let dirpath = 
+            (!path).Split('/')
+            |> Array.rev |> (fun arr -> if Array.length arr > 1 then Array.tail arr else [|"./"|]) |> Array.rev |> (fun s -> String.Join('/', s))
+          $"{dirpath}/{_path}"
+          |> parseModule
+          |> bind (fun _module -> // TODO push "run" function above so I can use it here
+            try
+              List.fold (fun _scope stmt -> execute stmt _scope) defaultScope _module |> Success
+            with
+            | err -> Failure $"[module execution]: {err.ToString()}"
+          )
+          |> (function Success succ -> succ.self :> obj | Failure fail -> failwithf $"{fail}")
 
       let evaluateToInt expr space = int32 (evaluate expr space :?> float)
 
@@ -424,7 +451,6 @@ module Lang
               let map = (dereference head _scope :?> obj list).[evaluateToInt iexpr scope] :?> Map<Identifier, obj>
               updvar hid (update tail value { parent = None; self = map; quit = None }).self _scope
             | RecursiveAccess _ -> failwithf "head of recursive access should not be a recursive access, this exception should never be raised"
-
         let _value = evaluate expr scope
         let curvalue = dereference ref scope
         let newvalue =
@@ -444,8 +470,8 @@ module Lang
               let rem = int (_value :?> float)
               if rem < 0 || rem >= List.length _c then failwithf "index out of bounds"
               _c |> List.mapi (fun i v -> i <> rem, v) |> List.filter fst |> List.map snd :> obj
+            // | :? Map<Identifier, obj> as _c -> Map.remove (_value :?> string) _c :> obj
             | _ -> failwithf $"Invalid operator (+=) for type {curvalue.GetType()}"
-
         update ref newvalue scope
       | Loop (id, expr, block) ->
         let n = evaluate expr scope :?> float
@@ -467,30 +493,16 @@ module Lang
         System.Threading.Thread.Sleep(timeout)
         scope
       | ProcedureCall (ref, elist) ->
-          let func = dereference ref scope :?> Method
-          if List.length func.plist <> List.length elist then failwithf $"number of parameters passed to \"{id}\" call did not match expected number of params"
-          { parent = Some scope; self = func.plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; quit = None }
-          |> runBlock func.statements
-          |> (fun _scope -> match _scope.parent with Some p -> p | None -> failwithf $"somehow the procedure did not have a parent, this exception should never be raised")
+        let func = dereference ref scope :?> Method
+        if List.length func.plist <> List.length elist then failwithf $"number of parameters passed to \"{id}\" call did not match expected number of params"
+        let parent = 
+          getparent None ref
+          |> (function Some pref -> { parent = Some scope; self = dereference pref scope :?> Map<Identifier, obj>; quit = None } | None -> scope)
+        { parent = Some parent; self = func.plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; quit = None }
+        |> runBlock func.statements
+        |> (fun _scope -> match _scope.parent with Some p -> p | None -> failwithf $"somehow the procedure did not have a parent, this exception should never be raised")
       | Return expr -> { scope with quit = Some expr }
-      | Use path ->
-        $"{path}" // TODO make this path relative to the program file, not to the interpreter
-        |> parseModule
-        |> bind (fun m -> // TODO push "run" function above so I can use it here
-          try
-            List.fold (fun s b -> execute b s) defaultScope m |> Success
-          with
-          | err -> Failure $"[module execution]: {err.ToString()}"
-        )
-        |> (function
-          | Success succ -> 
-            let par = 
-              match scope.parent with
-              | Some p -> { p with self = Map.fold (fun cur key value -> Map.add key value cur) p.self succ.self }
-              | None -> succ
-            { scope with parent = Some par }
-          | Failure fail -> failwithf $"{fail}"
-        )
+      
 
     let run program =
       try
@@ -509,8 +521,10 @@ module Lang
       | Failure _ -> ()
       res
 
-    let interpret path =
-      path
+    let interpret _path =
+      do path := _path
+
+      !path
       |> parse 
       // |> debug
       |> bind run 

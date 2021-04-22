@@ -2,7 +2,7 @@ module
 
 let pi = 3.1415926535897938
 
-function pow b e
+let pow = function b e
   let ret = 1
   loop i e
     ret = ret * b
@@ -10,7 +10,7 @@ function pow b e
   return ret
 end
 
-function isPrime n
+let isPrime = function n
   loop i n/2+2
     if n % (i+2) == 0
       return false
@@ -19,10 +19,10 @@ function isPrime n
   return true
 end
 
-function factorial n
-  let fac = 1
-  loop i n-1
-    fac = fac * (i + 1)
+let factorial = function n
+  if n <= 1
+    return 1
+  else
+    return n * factorial! n - 1 
   end
-  return fac
 end

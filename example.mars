@@ -1,10 +1,12 @@
-use "./math.mars"
+let math = use "math.mars"
 
-procedure main
+let main = procedure
 
   writeline "Hello from Mars!"
 
-  writeline "pi is approximately equal to " + pi
+  writeline "pi is approximately equal to " + math.pi
+
+  writeline "7! = " + math.factorial! 7
 
 end
 
