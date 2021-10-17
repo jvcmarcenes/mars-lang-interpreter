@@ -10,8 +10,6 @@ module Lang
 
     type Identifier = string
 
-    type ParamList = string list // alias for procedure and function parameters
-
     type AssignmentOperation = Set | PlusEquals | MinusEquals
 
     type UnaryOperation = NumberNegation | Identity | BooleanNegation
@@ -24,19 +22,17 @@ module Lang
 
     type SymbolReference =
       | VarReference of Identifier
-      | ArrayAccess of Identifier * Expression
+      | ArrayAccess of SymbolReference * Expression
       | RecursiveAccess of SymbolReference * SymbolReference
 
     and Expression =
       // Literals
       | StringLiteral of string
-      | IntLiteral of float
-      | FloatLiteral of float
+      | NumLiteral of float
       | BooleanLiteral of bool
       | ArrayLiteral of Expression list
       | MapLiteral of Map<Identifier, Expression>
-      | FunctionDefinition of ParamList * Block
-      | ProcedureDefinition of ParamList * Block
+      | FunctionDefinition of Identifier list * Block
       // Input
       | Read
       | ReadNumber
@@ -52,7 +48,7 @@ module Lang
       | Use of string
       | Empty
 
-    and Statement =
+    and Statement = // merge statements and expressions
       // Output
       | Write of Expression
       | WriteLine of Expression
@@ -60,45 +56,53 @@ module Lang
       | Definition of Identifier * Expression
       | Assignment of AssignmentOperation * SymbolReference * Expression
       | Return of Expression
-      // Flow Structure
+      // Flow Control
       | If of Expression * Block * Block
-      | Loop of Identifier * Expression * Block
-      | ProcedureCall of SymbolReference * Expression list
+      | Continue
+      | Break
+      | Loop of Block
+      | FunctionCallVoid of SymbolReference * Expression list
       // Others
       | Comment
-      | Sleep of Expression
+      | Sleep of Expression // remove
+      | Fail of Expression
 
     and Block = Statement list
 
     type Method = 
       {
-        statements: Block
-        plist: ParamList
+        Statements: Block
+        Plist: Identifier list
       }
-      static member create block plist = { statements = block; plist = plist }
+      static member Create block plist = { Statements = block; Plist = plist }
+
+    type ScopeControl =
+      | SReturn of Expression
+      | SContinue
+      | SBreak
 
     type Scope = { 
-      parent: Option<Scope>
-      self: Map<Identifier, obj>
-      quit: Option<Expression> // TODO rethink how return statements work?
+      Parent: Option<Scope>
+      Self: Map<Identifier, obj>
+      Control: Option<ScopeControl> // TODO rethink how return statements work?
     }
 
     module Scope =
 
       let defaultScope = {
-        parent = None
-        self = Map.empty
-        quit = None
+        Parent = None
+        Self = Map.empty
+        Control = None
       }
 
       let hasvar id scope = 
-        Map.containsKey id scope.self
+        Map.containsKey id scope.Self
 
-      let updscope f scope = { scope with self = f scope.self }
+      let updscope f scope = { scope with Self = f scope.Self }
 
       let recscope id scope act pact fact =
         if hasvar id scope then act ()
-        else match scope.parent with Some p -> pact p | None -> fact ()
+        else match scope.Parent with Some p -> pact p | None -> fact ()
 
       let addvar id value scope = 
         if hasvar id scope then failwithf $"{id} is already defined" 
@@ -118,7 +122,7 @@ module Lang
         recscope id scope act pact fact
 
       let rec getvar id scope = 
-        let act () = Map.find id scope.self
+        let act () = Map.find id scope.Self
         let pact p = getvar id p
         let fact () = failwithf $"{id} is not defined"
         recscope id scope act pact fact
@@ -129,9 +133,7 @@ module Lang
     // 
     let (<?|>) p1 p2 = attempt p1 <|> p2
 
-    let rec either = function
-      | p1::tail -> p1 <?|> either tail
-      | [] -> pzero
+    let either list = List.reduce (<?|>) list
 
     // helper method for statements with 3 values
     let fix f ((a, b), c) = f (a, b, c)
@@ -141,12 +143,12 @@ module Lang
     let ws = skipMany whitespace
     let ws1 = skipMany1 whitespace
 
+    let fnl = skipMany1 (ws .>> skipNewline >>. ws)
+    let onl = ws .>> skipMany (ws .>> skipNewline .>> ws)
     let nl = skipMany1 (ws .>> (skipNewline <|> skipChar ';') .>> ws)
 
-    let quote = skipChar '"'
     let comma = skipChar ','
-
-    let dslash = skipString "//"
+    let dot   = skipChar '.'
 
     let lpar = skipChar '('
     let rpar = skipChar ')'
@@ -162,7 +164,7 @@ module Lang
     let followedByEof = followedByL eof "end of file"
     //
 
-    let id = identifier (new IdentifierOptions()) |>> fun s -> s
+    let id = identifier (IdentifierOptions ())
 
     let statement, statementRef = createParserForwardedToRef<Statement, unit>()
 
@@ -173,28 +175,37 @@ module Lang
 
     let expr = opp.ExpressionParser
 
-    let stringLiteral = quote >>. manyCharsTill anyChar quote |>> StringLiteral 
-    let intLiteral = pint32 |>> fun i -> IntLiteral (float i)
-    let floatLiteral = pfloat |>> FloatLiteral
+    let stringParser = (skipChar '"' >>. manyTill anyChar (skipChar '"')) <?|> (skipChar ''' >>. manyTill anyChar (skipChar ''')) |>> (List.map string >> List.reduce (+))
+    
+    let stringLiteral = stringParser |>> StringLiteral 
+    let numLiteral = pfloat |>> NumLiteral
     let boolLiteral = stringReturn "true" true <|> stringReturn "false" false |>> BooleanLiteral
 
-    let arrayLiteral = lsbr >>. sepBy expr comma .>> rsbr |>> ArrayLiteral
-    let mapLiteral = lbra >>. manyTill (spaces >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr .>> nl) rbra |>> (Map.ofList >> MapLiteral)
+    let separator = either [comma .>> nl; comma; nl]
+    let sepOrFollowedBy other = ws >>. (separator <?|> followedBy other) .>> ws
+
+    let arrayLiteral = lsbr >>. onl >>. manyTill (ws >>. expr .>> sepOrFollowedBy rsbr) rsbr |>> ArrayLiteral
+    let mapLiteral = lbra >>. onl >>. manyTill (ws >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr .>> sepOrFollowedBy rbra) rbra |>> (Map.ofList >> MapLiteral)
 
     let paramlist = (ws1 >>. sepBy id ws1) <|> (ws >>. preturn []) .>> ws
     let funcdef = skipString "function" >>. paramlist .>> nl .>>. blockEndBy endtag |>> FunctionDefinition
-    let procdef = skipString "procedure" >>. paramlist .>> nl .>>. blockEndBy endtag |>> ProcedureDefinition
 
     let read = stringReturn "read" Read
     let readnumber = stringReturn "readnumber" ReadNumber
     let random = skipString "random" >>. ws1 >>. expr |>> Random
 
     let symbolref = 
-      sepBy1 (id .>>. opt (lsbr >>. expr .>> rsbr)) (skipChar '.') 
+      sepBy1 (id .>>. many (lsbr >>. expr .>> rsbr)) dot 
       |>> fun symbolList ->
         let rec createSymbolRef map rest = match rest with first::second -> RecursiveAccess (map, createSymbolRef first second) | [] -> map
         symbolList
-        |> List.map (fun (id, oacc) -> match oacc with Some expr -> ArrayAccess (id, expr) | None -> VarReference id) 
+        |> List.map (fun (id, oacc) -> 
+          let rec loop arrayAccesses =
+            match arrayAccesses with 
+            | head::tail -> ArrayAccess (loop tail, head)
+            | [] -> VarReference id
+          loop (List.rev oacc)
+        ) 
         |> (function h::t -> createSymbolRef h t | [] -> failwithf $"the parser sepBy1 will make sure that there is at least one element, this exception should never be raised")
 
     let symbolaccess = symbolref |>> SymbolAccess
@@ -206,17 +217,15 @@ module Lang
 
     let group = lpar >>. expr .>> rpar |>> Group
 
-    let _use = skipString "use" >>. ws1 >>. quote >>. manyCharsTill anyChar quote |>> Use
+    let _use = skipString "use" >>. ws1 >>. stringParser |>> Use
 
     opp.TermParser <- ws >>. either [
       stringLiteral <??> "String Literal"
-      floatLiteral <??> "Float Litereal"
-      intLiteral <??> "Integer Literal"
+      numLiteral <??> "Numeral Litereal"
       boolLiteral <??> "Boolean Literal"
       arrayLiteral <??> "Array Literal"
       mapLiteral <??> "Map Literal"
       funcdef <??> "Function Definition"
-      procdef <??> "Procedure Definition"
       readnumber <??> nameof readnumber
       read <??> nameof read
       random <??> nameof random
@@ -248,6 +257,7 @@ module Lang
     opp.AddOperator <| PrefixOperator("-", ws, 3, true, unary NumberNegation)
     opp.AddOperator <| PrefixOperator("+", ws, 3, true, unary Identity)
     opp.AddOperator <| PrefixOperator("!", ws, 1, true, unary BooleanNegation)
+    // Try to move '.' accessor operator and [] array accessor o function as a operation??
     //
 
     let equassign = stringReturn "=" Set
@@ -257,27 +267,31 @@ module Lang
     let assignops = either [equassign; addassign; minassign]
 
     // Statements
-    let singlecomment = dslash >>. restOfLine false >>% Comment
-    let multicomment = skipString "/*" >>. skipManyTill skipAnyChar (skipString "*/") >>% Comment
+    let singlecomment = skipChar '#' >>. restOfLine false >>% Comment
+    let multicomment = skipString "#[" >>. skipManyTill skipAnyChar (skipString "]#") >>% Comment
     let comment = singlecomment <|> multicomment
 
-    let writeline = skipString "writeline" >>. (ws1 >>. expr <|> empty) |>> WriteLine
+    let writeline = skipString "writeline" >>. ((ws1 >>. expr) <|> empty) |>> WriteLine
     let write = skipString "write" >>. ws1 >>. expr |>> Write
 
     let definition = skipString "let" >>. ws1 >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr |>> Definition
     let assignment = symbolref .>> ws .>>. assignops .>> ws .>>. expr |>> fun ((s, o), e) -> Assignment (o, s, e)
 
-    let sleep = skipString "sleep" >>. ws1 >>. intLiteral |>> Sleep
+    let sleep = skipString "sleep" >>. ws1 >>. numLiteral |>> Sleep
+    let _fail = skipString "fail" >>. ws1 >>. expr |>> Fail
 
-    let loop = skipString "loop" >>. ws1 >>. id .>> ws1 .>>. expr .>> nl .>>. blockEndBy endtag |>> fix Loop 
+    let _break = skipString "break" >>% Break
+    let _continue = skipString "continue" >>% Continue 
+
+    let loop = skipString "loop" >>. nl >>. blockEndBy endtag |>> Loop 
 
     let ifstmt, ifstmtRef = createParserForwardedToRef<Statement, unit>()
     let elseblock = skipString "else" >>. ((ws1 >>. ifstmt |>> fun s -> [s]) <|> (ws >>. nl >>. blockEndBy endtag))
     do ifstmtRef := skipString "if" >>. ws1 >>. expr .>> nl .>>. blockEndBy (endtag <|> followedByString "else") .>>. (elseblock <|> preturn []) |>> fix If
 
-    let proccall = symbolref .>>. methodcaller |>> ProcedureCall
+    let voidcall = symbolref .>>. methodcaller |>> FunctionCallVoid
 
-    let ret = skipString "return" >>. ws1 >>. expr |>> Return
+    let ret = skipString "return" >>. ((ws1 >>. expr) <|> empty) |>> Return
 
     do statementRef := spaces >>. either [
           writeline <??> nameof writeline
@@ -285,12 +299,15 @@ module Lang
           comment <??> "Comment"
           ret <??> nameof ret
           sleep <??> nameof sleep
+          _fail <??> "Fail Command"
           definition <??> "Symbol Definition"
+          _break <??> "Break Command"
+          _continue <??> "Continue Command"
           loop <??> "Loop Statement"
           ifstmt  <??> "If Statement"
           assignment <??> "Symbol Assignment"
-          proccall <??> "Procedure Call"
-        ] .>> ws // .>> optional (followedByL eof "end of file")
+          voidcall <??> "Funtion Call"
+        ] .>> ws
     //
 
     // Module
@@ -340,43 +357,32 @@ module Lang
 
     let rec execute stmt scope =
       let runBlock block scope =
-        let rec fold block scope =
-          match block with
-          | head::tail -> 
-            let _scope = execute head scope
-            match _scope.quit with
-            | Some _ -> _scope
-            | None -> fold tail _scope
-          | [] -> scope
+        let rec fold statements blockScope =
+          match statements with
+          | statement::rest -> 
+            let resScope = execute statement blockScope
+            match resScope.Control with
+            | Some _ -> resScope   
+            | None -> fold rest resScope
+          | [] -> blockScope
         fold block scope
 
       let rec evaluate expr scope =
-        let rec dereference ref scope = 
-          match ref with
-          | VarReference id -> getvar id scope
-          | ArrayAccess (id, expr) -> 
-            let index = int (evaluate expr scope :> obj :?> float)
-            (getvar id scope :?> obj list).[index]
-          | RecursiveAccess (head, tail) -> // I don't like how I have to create a dummy scope here
-            dereference tail { parent = None; self = (dereference head scope :?> Map<Identifier, obj>); quit = None }
-
         match expr with
         | StringLiteral s -> s :> obj
-        | IntLiteral n -> n :> obj
-        | FloatLiteral n -> n :> obj
+        | NumLiteral n -> n :> obj
         | BooleanLiteral b -> b :> obj
         | ArrayLiteral arr -> arr |> List.map (fun expr -> evaluate expr scope) :> obj
         | MapLiteral m -> m |> Map.map (fun _ expr -> evaluate expr scope) :> obj
-        | FunctionDefinition (plist, block) -> Method.create block plist :> obj
-        | ProcedureDefinition (plist, block) -> Method.create block plist :> obj
+        | FunctionDefinition (plist, block) -> Method.Create block plist :> obj
         | SymbolAccess symbolref -> dereference symbolref scope
         | Read -> Console.ReadLine() :> obj
         | ReadNumber -> float (Console.ReadLine ()) :> obj
-        | Random expr -> (new Random()).Next() % (evaluate expr scope :?> int) :> obj
+        | Random expr -> float ((System.Random ()).Next() % (int (evaluate expr scope :?> float))) :> obj
         | Unary (op, x) ->
           let _x = evaluate x scope
           match op with
-          | NumberNegation -> -(_x :?> int) :> obj
+          | NumberNegation -> -(_x :?> float) :> obj
           | Identity -> _x
           | BooleanNegation -> not (_x :?> bool) :> obj
         | Binary (op, l, r) ->
@@ -396,17 +402,31 @@ module Lang
           | GreaterThanOrEquals -> oper<IComparable, bool> (>=) _l _r
           | LesserThan -> oper<IComparable, bool> (<) _l _r
           | LesserThanOrEquals -> oper<IComparable, bool> (<=) _l _r
-        | Group expr  -> evaluate expr scope
-        | Empty -> "" :> obj
+        | Group expr -> evaluate expr scope
+        | Empty -> () :> obj
         | FunctionCall (ref, elist) ->
-          let func = dereference ref scope :?> Method
-          if List.length func.plist <> List.length elist then failwithf $"number of parameters passed to \"{id}\" call did not match expected number of params"
+          let func = try dereference ref scope :?> Method with e -> failwith $"{getname ref scope} is not a function and cannot be called"
+          if List.length func.Plist <> List.length elist then failwithf $"number of parameters passed to \"{getname ref scope}\" call did not match expected number of params"
           let parent = 
             getparent None ref
-            |> (function Some pref -> { parent = Some scope; self = dereference pref scope :?> Map<Identifier, obj>; quit = None } | None -> scope)
-          { parent = Some parent; self = func.plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; quit = None }
-          |> runBlock func.statements
-          |> (fun _scope -> match _scope.quit with Some rexpr -> evaluate rexpr _scope | None -> failwith $"function \"{id}\" did not return a value")
+            |> (function
+              | Some pref -> 
+                match (dereference pref scope) with 
+                | :? Map<Identifier, obj> as map -> { Parent = Some scope; Self = map; Control = None }
+                | _ -> scope
+              | None -> scope
+            )
+          { Parent = Some parent; Self = func.Plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; Control = None }
+          |> runBlock func.Statements
+          |> (fun _scope -> 
+            match _scope.Control with 
+            | Some control -> 
+              match control with
+              | SReturn expression -> evaluate expression _scope
+              | SBreak -> failwith $"unexpected break command"
+              | SContinue -> failwith $"unexpected continue command" 
+            | None -> failwith $"function \"{id}\" did not return a value"
+          )
         | Use _path ->
           let dirpath = 
             (!path).Split('/')
@@ -419,15 +439,77 @@ module Lang
             with
             | err -> Failure $"[module execution]: {err.ToString()}"
           )
-          |> (function Success succ -> succ.self :> obj | Failure fail -> failwithf $"{fail}")
+          |> (function Success succ -> succ.Self :> obj | Failure fail -> failwithf $"{fail}")
 
-      let evaluateToInt expr space = int32 (evaluate expr space :?> float)
-
-      let rec dereference ref scope = 
+      and dereference ref scope = 
         match ref with
         | VarReference id -> getvar id scope
-        | ArrayAccess (id, expr) -> (getvar id scope :?> obj list).[int (evaluate expr scope :?> float)]
-        | RecursiveAccess (head, tail) -> dereference tail { parent = None; self = (dereference head scope :?> Map<Identifier, obj>); quit = None }
+        | ArrayAccess (head, expr) ->
+          let index = int (evaluate expr scope :?> float)
+          (dereference head scope :?> obj list).[index]
+        | RecursiveAccess (head, tail) ->
+          let symbol = dereference head scope
+          match symbol with
+          | :? Map<Identifier, obj> as map -> dereference tail { Parent = None; Self = map; Control = None } // I don't like that we have to create a dummy scope here
+          | :? string as s ->
+            match tail with
+            | VarReference id ->
+              match id with
+              | "size" -> float (String.length s) :> obj
+              | _ -> failwith $"illegal recursive access"
+            | _ -> failwith $"illegal recursive access"
+          | :? (obj list) as array -> 
+            match tail with
+            | VarReference id -> 
+              match id with
+              | "size" -> float (List.length array) :> obj
+              | "iter" ->
+                Method.Create [
+                  Definition ("i", NumLiteral 0.0)
+                  Loop [
+                    FunctionCallVoid (VarReference "f", [SymbolAccess (ArrayAccess (head, SymbolAccess (VarReference "i")))])
+                    Assignment (PlusEquals, VarReference "i", NumLiteral 1.0)
+                    If (
+                      Binary (
+                        GreaterThanOrEquals, 
+                        SymbolAccess (VarReference "i"), 
+                        SymbolAccess (RecursiveAccess (head, VarReference "size"))
+                      ), [Break], []
+                    )
+                  ]
+                ] ["f"] :> obj
+              | "map" ->
+                Method.Create [
+                  Definition ("ret", ArrayLiteral [])
+                  Definition ("i", NumLiteral 0.0)
+                  Loop [
+                    Assignment (
+                      PlusEquals,
+                      VarReference "ret",
+                      FunctionCall (VarReference "f", [SymbolAccess (ArrayAccess (head, SymbolAccess (VarReference "i")))])
+                    )
+                    Assignment (PlusEquals, VarReference "i", NumLiteral 1.0)
+                    If (
+                      Binary (
+                        GreaterThanOrEquals, 
+                        SymbolAccess (VarReference "i"), 
+                        SymbolAccess (RecursiveAccess (head, VarReference "size"))
+                      ), [Break], []
+                    )
+                  ]
+                  Return (SymbolAccess (VarReference "ret"))
+                ] ["f"] :> obj
+              | _ -> failwith $"illegal recursive access"
+            | _ -> failwith $"illegal recursive access"
+          | _ -> failwith $"illegal recursive access"
+
+      and getname ref scope =
+        match ref with
+        | VarReference id -> id
+        | ArrayAccess (head, expr) -> $"{getname head}[{evaluate expr scope}]"
+        | RecursiveAccess (head, tail) -> $"{getname tail}.{getname head}"
+
+      let evaluateToInt expr space = int32 (evaluate expr space :?> float)
 
       match stmt with
       | Comment -> scope
@@ -438,18 +520,21 @@ module Lang
         let rec update ref value _scope =
           match ref with
           | VarReference id -> updvar id value _scope
-          | ArrayAccess (id, iexpr) -> 
+          | ArrayAccess (head, iexpr) -> 
             let index = evaluateToInt iexpr scope
-            let newarr = (getvar id _scope :?> obj list) |> List.mapi (fun i v -> if i = index then value else v)
-            updvar id newarr _scope
+            let arr = dereference head _scope :?> obj list
+            match head with
+            | VarReference id -> updvar id (List.mapi (fun i o -> if i = index then value else o) arr) _scope
+            | ArrayAccess (shead, siexpr) -> update (ArrayAccess (shead, siexpr)) (List.mapi (fun i o -> if i = index then value else o) arr) _scope
+            | RecursiveAccess _ -> failwith "head of array cannot be a recursive access, this exceptioin should never be raised"
           | RecursiveAccess (head, tail) -> 
             match head with
             | VarReference hid -> 
               let map = dereference head _scope :?> Map<Identifier, obj>
-              updvar hid (update tail value { parent = None; self = map; quit = None }).self _scope
+              updvar hid (update tail value { Parent = None; Self = map; Control = None }).Self _scope
             | ArrayAccess (hid, iexpr) -> 
               let map = (dereference head _scope :?> obj list).[evaluateToInt iexpr scope] :?> Map<Identifier, obj>
-              updvar hid (update tail value { parent = None; self = map; quit = None }).self _scope
+              update hid (update tail value { Parent = None; Self = map; Control = None }).Self _scope
             | RecursiveAccess _ -> failwithf "head of recursive access should not be a recursive access, this exception should never be raised"
         let _value = evaluate expr scope
         let curvalue = dereference ref scope
@@ -462,6 +547,14 @@ module Lang
             | :? (obj list) as _c -> 
               if _value :? (obj list) then List.append _c (_value :?> obj list) :> obj
               else List.append _c [_value] :> obj
+            | :? Map<Identifier, obj> as map ->
+              if _value :? (Map<Identifier, obj>) then
+                curvalue :?> Map<Identifier, obj>
+                |> Map.toList
+                |> List.append (Map.toList (_value :?> Map<Identifier, obj>))
+                |> Map.ofList
+                :> obj
+              else failwithf $"Invalid operator (+=) for type {curvalue.GetType()}"
             | _ -> failwithf $"Invalid operator (+=) for type {curvalue.GetType()}"
           | MinusEquals ->
             match curvalue with
@@ -473,35 +566,45 @@ module Lang
             // | :? Map<Identifier, obj> as _c -> Map.remove (_value :?> string) _c :> obj
             | _ -> failwithf $"Invalid operator (+=) for type {curvalue.GetType()}"
         update ref newvalue scope
-      | Loop (id, expr, block) ->
-        let n = evaluate expr scope :?> float
-        let rec innerLoop (space: Scope) =
-          if (getvar id space :?> float) > n then
-            remvar id space
-          else
-            block
-            |> List.fold (fun spc stmt -> execute stmt spc) space
-            |> fun spc -> updvar id (getvar id spc :?> float + 1.0) spc
-            |> innerLoop
-        innerLoop (addvar id 0.0 scope)
-      | If (expr, tblock, fblock) ->
-        let b = evaluate expr scope :?> bool
-        if b then tblock else fblock 
+      | Break -> { scope with Control = Some SBreak }
+      | Continue -> { scope with Control = Some SContinue }
+      | Loop block ->
+        let rec innerLoop statements blockScope =
+          match statements with
+          | statement::rest -> 
+            let resScope = execute statement blockScope
+            match resScope.Control with
+            | Some (SReturn _) -> resScope
+            | Some SBreak -> { resScope with Control = None }
+            | Some SContinue -> innerLoop block { resScope with Control = None }
+            | None -> innerLoop rest { resScope with Control = None }
+          | [] -> innerLoop block blockScope
+        innerLoop block scope
+      | If (condition, true_block, false_block) ->
+        let flag = evaluate condition scope :?> bool
+        if flag then true_block else false_block 
         |> List.fold (fun spc stmt -> execute stmt spc) scope
       | Sleep expr -> 
         let timeout = evaluate expr scope :?> int
         System.Threading.Thread.Sleep(timeout)
         scope
-      | ProcedureCall (ref, elist) ->
-        let func = dereference ref scope :?> Method
-        if List.length func.plist <> List.length elist then failwithf $"number of parameters passed to \"{id}\" call did not match expected number of params"
+      | Fail expr -> failwith (string (evaluate expr scope))
+      | FunctionCallVoid (ref, elist) ->
+        let func = try dereference ref scope :?> Method with _ -> failwithf $"{getname ref scope} is not a function and cannot be called"
+        if List.length func.Plist <> List.length elist then failwithf $"number of parameters passed to \"{getname ref scope}\" call did not match expected number of params"
         let parent = 
           getparent None ref
-          |> (function Some pref -> { parent = Some scope; self = dereference pref scope :?> Map<Identifier, obj>; quit = None } | None -> scope)
-        { parent = Some parent; self = func.plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; quit = None }
-        |> runBlock func.statements
-        |> (fun _scope -> match _scope.parent with Some p -> p | None -> failwithf $"somehow the procedure did not have a parent, this exception should never be raised")
-      | Return expr -> { scope with quit = Some expr }
+          |> (function
+            | Some pref -> 
+              match (dereference pref scope) with 
+              | :? Map<Identifier, obj> as map -> { Parent = Some scope; Self = map; Control = None }
+              | _ -> scope
+            | None -> scope
+          )
+        { Parent = Some parent; Self = func.Plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; Control = None }
+        |> runBlock func.Statements
+        |> (fun _scope -> match _scope.Parent with Some p -> p | None -> failwithf $"somehow the procedure did not have a parent, this exception should never be raised")
+      | Return expr -> { scope with Control = Some (SReturn expr) }
       
 
     let run program =
@@ -509,11 +612,11 @@ module Lang
         List.fold (fun space block -> execute block space) defaultScope program
         |> Success
       with
-      | err -> Failure ("[execution]: " + err.ToString())
+      | err -> Failure ("[execution]: " + err.ToString ())
 
     let finish = function
-      | Success _ -> printfn "\nProgram finished execution without errors."
       | Failure fail -> printfn $"{fail}"
+      | _ -> ()
 
     let debug res =
       match res with
@@ -526,7 +629,7 @@ module Lang
 
       !path
       |> parse 
-      // |> debug
+      // |> (fun res -> match res with Success prog -> printfn "%A" prog; res | Failure _ -> res)
       |> bind run 
       // |> debug
       |> finish
