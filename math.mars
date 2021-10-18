@@ -2,27 +2,26 @@ module
 
 let pi = 3.1415926535897938
 
-let pow = function b e
+let pow = function b e {
   let ret = 1
-  loop i e
+  loop {
     ret = ret * b
-  end
+    e -= 1
+    if e <= 0 { break }
+  }
   return ret
-end
+}
 
-let isPrime = function n
-  loop i n/2+2
-    if n % (i+2) == 0
-      return false
-    end
-  end
+let isPrime = function n {
+  let max = n / 2
+  let i = 2
+  loop {
+    if n % i == 0 { return false }
+  }
   return true
-end
+}
 
-let factorial = function n
-  if n <= 1
-    return 1
-  else
-    return n * factorial! n - 1 
-  end
-end
+let factorial = function n {
+  if n <= 1 { return 1 }
+  else { return n * factorial! n - 1 }
+}

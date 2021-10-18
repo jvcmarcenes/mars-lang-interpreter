@@ -164,15 +164,17 @@ module Lang
 
     let followedByEof = followedByL eof "end of file"
 
+    let keywords = ["let"; "loop"; "break"; "continue"; "if"; "else"; "end"; "use"; "function"; "return"] |> List.map skipString |> either
+
     let empty = nl <?|> followedByEof >>% Empty
     //
 
-    let id = identifier (IdentifierOptions ())
+    let id = notFollowedBy keywords >>. identifier (IdentifierOptions ())
 
     let statement, statementRef = createParserForwardedToRef<Statement, unit>()
 
     // let block = nl >>. manyTill (statement .>> (nl <?|> followedByEof)) (ws >>. skipString "end")
-    let block = onl >>. lbra >>. onl >>. manyTill (statement .>> (either [ws .>> followedBy rbra; nl; followedByEof])) (ws >>. rbra)
+    let block = onl >>. lbra >>. onl >>. manyTill (ws >>. statement .>> ws .>> (either [nl; followedBy rbra; followedByEof])) (ws >>. rbra) <??> "Block"
 
     // Expressions
     let opp = OperatorPrecedenceParser<Expression, _, _>()
@@ -194,8 +196,8 @@ module Lang
     let arrayLiteral = lsbr >>. onl >>. manyTill (ws >>. expr .>> sepOrFollowedBy rsbr) rsbr |>> ArrayLiteral
     let mapLiteral = lbra >>. onl >>. manyTill (ws >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr .>> sepOrFollowedBy rbra) rbra |>> (Map.ofList >> MapLiteral)
 
-    let paramlist = (ws1 >>. sepBy id ws1) <|> (ws >>. preturn []) .>> ws
-    let funcdef = skipString "function" >>. paramlist .>>. block |>> FunctionDefinition
+    let paramlist = (ws1 >>. many (id .>> (ws1 <?|> followedBy lbra))) <?|> (ws >>. preturn []) <??> "Parameter List"
+    let funcdef = skipString "function" >>. paramlist .>> ws .>>. block |>> FunctionDefinition
 
     let read = stringReturn "read" Read
     let readnumber = stringReturn "readnumber" ReadNumber
@@ -266,7 +268,6 @@ module Lang
     opp.AddOperator <| PrefixOperator("-", notFollowedBy ws1, 3, true, unary NumberNegation)
     opp.AddOperator <| PrefixOperator("+", notFollowedBy ws1, 3, true, unary Identity)
     opp.AddOperator <| PrefixOperator("!", notFollowedBy ws1, 1, true, unary BooleanNegation)
-
     // Try to move '.' (accessor operator), [] (array accessor), and '!' (function caller) to operations??
     //
 
@@ -296,8 +297,8 @@ module Lang
     let loop = skipString "loop" >>. block |>> Loop 
 
     let ifstmt, ifstmtRef = createParserForwardedToRef<Statement, unit>()
-    let elseblock = skipString "else" >>. ((ws1 >>. ifstmt |>> fun s -> [s]) <|> (ws >>. block))
-    do ifstmtRef := skipString "if" >>. ws1 >>. expr .>>. block .>>. (elseblock <|> preturn []) |>> fix If
+    let elseblock = skipString "else" >>. ((ws1 >>. ifstmt |>> fun s -> [s]) <?|> (ws >>. block))
+    do ifstmtRef := skipString "if" >>. ws1 >>. expr .>>. block .>> onl .>>. (elseblock <?|> preturn []) |>> fix If
 
     let voidcall = symbolref .>>. methodcaller |>> FunctionCallVoid
 
@@ -323,7 +324,7 @@ module Lang
     // Module
     // let blockEndBy endp = ws >>. manyTill (statement .>> (nl <|> followedByEof)) (ws >>. endp)
 
-    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill (spaces >>. (definition <?|> comment) .>> ws .>> (nl <|> followedByEof)) (ws >>. eof)
+    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill ((ws >>. (definition <?|> comment) .>> ws) .>> (nl <?|> followedByEof)) (ws >>. eof)
 
     let parseModule path =
       match runParserOnFile moduleParser () path Text.Encoding.UTF8 with

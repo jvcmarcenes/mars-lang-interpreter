@@ -1,13 +1,15 @@
 let math = use "math.mars"
 
-let main = procedure
+let main = function {
 
-  writeline "Hello from Mars!"
+  writeline 'Hello from Mars!'
 
-  writeline "pi is approximately equal to " + math.pi
+  writeline 'pi is approximately equal to #{math.pi}'
 
-  writeline "7! = " + math.factorial! 7
+  writeline '2³ = #{math.pow! 2 3}'
 
-end
+  writeline '4! = #{math.factorial! 4}'
+
+}
 
 main!
