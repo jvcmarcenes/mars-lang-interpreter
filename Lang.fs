@@ -19,6 +19,7 @@ module Lang
       | Equals | NotEquals // equality operators
       | And | Or // boolean operators
       | GreaterThan | GreaterThanOrEquals | LesserThan | LesserThanOrEquals //comparison operators
+      // | Access
 
     type SymbolReference =
       | VarReference of Identifier
@@ -27,7 +28,9 @@ module Lang
 
     and Expression =
       // Literals
+      | ObjectValue of obj
       | StringLiteral of string
+      | TemplateString of Expression list
       | NumLiteral of float
       | BooleanLiteral of bool
       | ArrayLiteral of Expression list
@@ -135,6 +138,8 @@ module Lang
 
     let either list = List.reduce (<?|>) list
 
+    let enclosed popen pclose p = popen >>. manyTill p pclose
+
     // helper method for statements with 3 values
     let fix f ((a, b), c) = f (a, b, c)
 
@@ -159,9 +164,9 @@ module Lang
 
     let endtag = skipString "end"
 
-    let empty = followedByNewline <|> followedBy eof >>% Empty
-
     let followedByEof = followedByL eof "end of file"
+
+    let empty = nl <?|> followedByEof >>% Empty
     //
 
     let id = identifier (IdentifierOptions ())
@@ -175,9 +180,12 @@ module Lang
 
     let expr = opp.ExpressionParser
 
-    let stringParser = (skipChar '"' >>. manyTill anyChar (skipChar '"')) <?|> (skipChar ''' >>. manyTill anyChar (skipChar ''')) |>> (List.map string >> List.reduce (+))
+    let clistToString = function [] -> "" | c -> c  |> List.map string |> List.reduce (+)
+    let stringParser = enclosed (skipChar '"') (skipChar '"') anyChar |>> clistToString
     
-    let stringLiteral = stringParser |>> StringLiteral 
+    let stringLiteral = stringParser |>> StringLiteral
+    let templateString = enclosed (skipChar ''') (skipChar ''') ((skipString "#{" >>. expr .>> skipString "}") <?|> ((manyTill anyChar (followedByString "'" <?|> followedByString "#{")) |>> (clistToString >> StringLiteral))) |>> TemplateString
+
     let numLiteral = pfloat |>> NumLiteral
     let boolLiteral = stringReturn "true" true <|> stringReturn "false" false |>> BooleanLiteral
 
@@ -205,12 +213,13 @@ module Lang
             | head::tail -> ArrayAccess (loop tail, head)
             | [] -> VarReference id
           loop (List.rev oacc)
-        ) 
+        )
         |> (function h::t -> createSymbolRef h t | [] -> failwithf $"the parser sepBy1 will make sure that there is at least one element, this exception should never be raised")
 
     let symbolaccess = symbolref |>> SymbolAccess
 
     // let methodcaller = (ws1 >>. sepBy1 expr (followedBy expr)) <?|> (stringReturn "!" []) // this method caller should not parse expr as funccalls 
+    // let methodcaller = ws1 >>. sepBy expr (followedBy expr)
     let methodcaller = (skipChar '!' >>. sepBy expr (followedBy expr))
 
     let funccall = symbolref .>>. methodcaller |>> FunctionCall
@@ -220,6 +229,7 @@ module Lang
     let _use = skipString "use" >>. ws1 >>. stringParser |>> Use
 
     opp.TermParser <- ws >>. either [
+      templateString <??> "Template String"
       stringLiteral <??> "String Literal"
       numLiteral <??> "Numeral Litereal"
       boolLiteral <??> "Boolean Literal"
@@ -254,10 +264,11 @@ module Lang
     opp.AddOperator <| InfixOperator("<", ws, 2, Associativity.None, binary LesserThan)
     opp.AddOperator <| InfixOperator("<=", ws, 2, Associativity.None, binary LesserThanOrEquals)
 
-    opp.AddOperator <| PrefixOperator("-", ws, 3, true, unary NumberNegation)
-    opp.AddOperator <| PrefixOperator("+", ws, 3, true, unary Identity)
-    opp.AddOperator <| PrefixOperator("!", ws, 1, true, unary BooleanNegation)
-    // Try to move '.' accessor operator and [] array accessor o function as a operation??
+    opp.AddOperator <| PrefixOperator("-", notFollowedBy ws1, 3, true, unary NumberNegation)
+    opp.AddOperator <| PrefixOperator("+", notFollowedBy ws1, 3, true, unary Identity)
+    opp.AddOperator <| PrefixOperator("!", notFollowedBy ws1, 1, true, unary BooleanNegation)
+
+    // Try to move '.' (accessor operator), [] (array accessor), and '!' (function caller) to operations??
     //
 
     let equassign = stringReturn "=" Set
@@ -274,7 +285,7 @@ module Lang
     let writeline = skipString "writeline" >>. ((ws1 >>. expr) <|> empty) |>> WriteLine
     let write = skipString "write" >>. ws1 >>. expr |>> Write
 
-    let definition = skipString "let" >>. ws1 >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr |>> Definition
+    let definition = skipString "let" >>. ws1 >>. id .>> ws .>>. ((skipChar '=' .>> ws >>. expr) <?|> empty) |>> Definition
     let assignment = symbolref .>> ws .>>. assignops .>> ws .>>. expr |>> fun ((s, o), e) -> Assignment (o, s, e)
 
     let sleep = skipString "sleep" >>. ws1 >>. numLiteral |>> Sleep
@@ -369,7 +380,9 @@ module Lang
 
       let rec evaluate expr scope =
         match expr with
+        | ObjectValue o -> o
         | StringLiteral s -> s :> obj
+        | TemplateString exprList -> exprList |> List.map ((fun x -> evaluate x scope) >> string) |> List.reduce (+) :> obj
         | NumLiteral n -> n :> obj
         | BooleanLiteral b -> b :> obj
         | ArrayLiteral arr -> arr |> List.map (fun expr -> evaluate expr scope) :> obj
@@ -401,7 +414,7 @@ module Lang
           | GreaterThan -> oper<IComparable, bool> (>) _l _r
           | GreaterThanOrEquals -> oper<IComparable, bool> (>=) _l _r
           | LesserThan -> oper<IComparable, bool> (<) _l _r
-          | LesserThanOrEquals -> oper<IComparable, bool> (<=) _l _r
+          | LesserThanOrEquals -> oper<IComparable, bool> (<=) _l _r  
         | Group expr -> evaluate expr scope
         | Empty -> () :> obj
         | FunctionCall (ref, elist) ->
@@ -450,7 +463,14 @@ module Lang
         | RecursiveAccess (head, tail) ->
           let symbol = dereference head scope
           match symbol with
-          | :? Map<Identifier, obj> as map -> dereference tail { Parent = None; Self = map; Control = None } // I don't like that we have to create a dummy scope here
+          | :? Map<Identifier, obj> as map -> 
+            match tail with
+            | VarReference id ->
+              match id with
+              // | "size" -> float (map |> Map.toList |> List.length) :> obj
+              | "toList" -> Method.Create [Return (map |> Map.toList |> List.map ((fun (key, value) -> [StringLiteral key; ObjectValue value] |> ArrayLiteral)) |> ArrayLiteral)] [] :> obj
+              | _ -> dereference tail { Parent = None; Self = map; Control = None }
+            | _ -> dereference tail { Parent = None; Self = map; Control = None } // I don't like that we have to create a dummy scope here
           | :? string as s ->
             match tail with
             | VarReference id ->
@@ -463,42 +483,19 @@ module Lang
             | VarReference id -> 
               match id with
               | "size" -> float (List.length array) :> obj
-              | "iter" ->
+              | "iter" -> Method.Create (array |> List.map(fun v -> FunctionCallVoid (VarReference "#f", [ObjectValue v]))) ["#f"] :> obj
+              | "iteri" -> Method.Create (array |> List.mapi(fun i v -> FunctionCallVoid (VarReference "#f", [NumLiteral (float i); ObjectValue v]))) ["#f"] :> obj
+              | "map" -> Method.Create [Return (array |> List.map (fun v -> FunctionCall (VarReference "#f", [ObjectValue v])) |> ArrayLiteral)] ["#f"] :> obj
+              | "filter" ->
                 Method.Create [
-                  Definition ("i", NumLiteral 0.0)
-                  Loop [
-                    FunctionCallVoid (VarReference "f", [SymbolAccess (ArrayAccess (head, SymbolAccess (VarReference "i")))])
-                    Assignment (PlusEquals, VarReference "i", NumLiteral 1.0)
-                    If (
-                      Binary (
-                        GreaterThanOrEquals, 
-                        SymbolAccess (VarReference "i"), 
-                        SymbolAccess (RecursiveAccess (head, VarReference "size"))
-                      ), [Break], []
-                    )
-                  ]
-                ] ["f"] :> obj
-              | "map" ->
-                Method.Create [
-                  Definition ("ret", ArrayLiteral [])
-                  Definition ("i", NumLiteral 0.0)
-                  Loop [
-                    Assignment (
-                      PlusEquals,
-                      VarReference "ret",
-                      FunctionCall (VarReference "f", [SymbolAccess (ArrayAccess (head, SymbolAccess (VarReference "i")))])
-                    )
-                    Assignment (PlusEquals, VarReference "i", NumLiteral 1.0)
-                    If (
-                      Binary (
-                        GreaterThanOrEquals, 
-                        SymbolAccess (VarReference "i"), 
-                        SymbolAccess (RecursiveAccess (head, VarReference "size"))
-                      ), [Break], []
-                    )
-                  ]
-                  Return (SymbolAccess (VarReference "ret"))
-                ] ["f"] :> obj
+                  Return (
+                    array
+                    |> List.filter (fun v -> evaluate (FunctionCall (VarReference "#f", [ObjectValue v])) scope :?> bool)
+                    |> List.map ObjectValue
+                    |> ArrayLiteral
+                  )
+                ] ["#f"] :> obj
+              | "sort" -> Method.Create [Return(array |> List.map (fun v -> v :?> IComparable) |> List.sort |> List.map (fun v -> ObjectValue (v :> obj)) |> ArrayLiteral)] [] :> obj
               | _ -> failwith $"illegal recursive access"
             | _ -> failwith $"illegal recursive access"
           | _ -> failwith $"illegal recursive access"
@@ -563,7 +560,7 @@ module Lang
               let rem = int (_value :?> float)
               if rem < 0 || rem >= List.length _c then failwithf "index out of bounds"
               _c |> List.mapi (fun i v -> i <> rem, v) |> List.filter fst |> List.map snd :> obj
-            // | :? Map<Identifier, obj> as _c -> Map.remove (_value :?> string) _c :> obj
+            | :? Map<Identifier, obj> as _c -> Map.remove (_value :?> string) _c :> obj
             | _ -> failwithf $"Invalid operator (+=) for type {curvalue.GetType()}"
         update ref newvalue scope
       | Break -> { scope with Control = Some SBreak }
@@ -607,29 +604,31 @@ module Lang
       | Return expr -> { scope with Control = Some (SReturn expr) }
       
 
-    let run program =
+    let run dev program =
       try
         List.fold (fun space block -> execute block space) defaultScope program
         |> Success
       with
-      | err -> Failure ("[execution]: " + err.ToString ())
+      | err -> Failure ("[execution]: " + if dev then err.ToString () else err.Message)
 
     let finish = function
       | Failure fail -> printfn $"{fail}"
       | _ -> ()
 
-    let debug res =
-      match res with
-      | Success succ -> printfn $"[debug]: {succ}"
-      | Failure _ -> ()
-      res
+    let debug f dev res =
+      if dev then
+        match res with
+        | Success succ -> f succ
+        | Failure _ -> ()
+        res
+      else res
 
-    let interpret _path =
+    let interpret _path dev =
       do path := _path
 
       !path
       |> parse 
-      // |> (fun res -> match res with Success prog -> printfn "%A" prog; res | Failure _ -> res)
-      |> bind run 
-      // |> debug
+      // |> debug (fun x -> printfn "[debug]: %A" x) dev
+      |> bind (run dev)
+      // |> debug (fun x -> printfn "[debug]: {x}") dev
       |> finish
