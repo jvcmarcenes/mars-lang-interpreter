@@ -162,8 +162,6 @@ module Lang
     let lbra = skipChar '{'
     let rbra = skipChar '}'
 
-    let endtag = skipString "end"
-
     let followedByEof = followedByL eof "end of file"
 
     let empty = nl <?|> followedByEof >>% Empty
@@ -173,7 +171,8 @@ module Lang
 
     let statement, statementRef = createParserForwardedToRef<Statement, unit>()
 
-    let blockEndBy endp = ws >>. manyTill (statement .>> (nl <|> followedByEof)) (ws >>. endp)
+    // let block = nl >>. manyTill (statement .>> (nl <?|> followedByEof)) (ws >>. skipString "end")
+    let block = onl >>. lbra >>. onl >>. manyTill (statement .>> (either [ws .>> followedBy rbra; nl; followedByEof])) (ws >>. rbra)
 
     // Expressions
     let opp = OperatorPrecedenceParser<Expression, _, _>()
@@ -196,7 +195,7 @@ module Lang
     let mapLiteral = lbra >>. onl >>. manyTill (ws >>. id .>> ws .>> skipChar '=' .>> ws .>>. expr .>> sepOrFollowedBy rbra) rbra |>> (Map.ofList >> MapLiteral)
 
     let paramlist = (ws1 >>. sepBy id ws1) <|> (ws >>. preturn []) .>> ws
-    let funcdef = skipString "function" >>. paramlist .>> nl .>>. blockEndBy endtag |>> FunctionDefinition
+    let funcdef = skipString "function" >>. paramlist .>>. block |>> FunctionDefinition
 
     let read = stringReturn "read" Read
     let readnumber = stringReturn "readnumber" ReadNumber
@@ -294,11 +293,11 @@ module Lang
     let _break = skipString "break" >>% Break
     let _continue = skipString "continue" >>% Continue 
 
-    let loop = skipString "loop" >>. nl >>. blockEndBy endtag |>> Loop 
+    let loop = skipString "loop" >>. block |>> Loop 
 
     let ifstmt, ifstmtRef = createParserForwardedToRef<Statement, unit>()
-    let elseblock = skipString "else" >>. ((ws1 >>. ifstmt |>> fun s -> [s]) <|> (ws >>. nl >>. blockEndBy endtag))
-    do ifstmtRef := skipString "if" >>. ws1 >>. expr .>> nl .>>. blockEndBy (endtag <|> followedByString "else") .>>. (elseblock <|> preturn []) |>> fix If
+    let elseblock = skipString "else" >>. ((ws1 >>. ifstmt |>> fun s -> [s]) <|> (ws >>. block))
+    do ifstmtRef := skipString "if" >>. ws1 >>. expr .>>. block .>>. (elseblock <|> preturn []) |>> fix If
 
     let voidcall = symbolref .>>. methodcaller |>> FunctionCallVoid
 
@@ -333,7 +332,7 @@ module Lang
     //
 
     // Program parsing
-    let program = blockEndBy eof
+    let program = ws >>. manyTill (statement .>> (nl <|> followedByEof)) (ws >>. eof)
 
     let parse path =
       match runParserOnFile program () path Text.Encoding.UTF8 with
