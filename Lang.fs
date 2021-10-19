@@ -298,7 +298,7 @@ module Lang
 
     let ifstmt, ifstmtRef = createParserForwardedToRef<Statement, unit>()
     let elseblock = skipString "else" >>. ((ws1 >>. ifstmt |>> fun s -> [s]) <?|> (ws >>. block))
-    do ifstmtRef := skipString "if" >>. ws1 >>. expr .>>. block .>> onl .>>. (elseblock <?|> preturn []) |>> fix If
+    do ifstmtRef := skipString "if" >>. ws1 >>. expr .>>. block .>> ws .>>. (elseblock <?|> preturn []) |>> fix If
 
     let voidcall = symbolref .>>. methodcaller |>> FunctionCallVoid
 
@@ -373,7 +373,7 @@ module Lang
           | statement::rest -> 
             let resScope = execute statement blockScope
             match resScope.Control with
-            | Some _ -> resScope   
+            | Some _ -> resScope
             | None -> fold rest resScope
           | [] -> blockScope
         fold block scope
@@ -600,7 +600,7 @@ module Lang
           )
         { Parent = Some parent; Self = func.Plist |> List.mapi (fun i  v -> v, (evaluate elist.[i] scope)) |> Map.ofSeq; Control = None }
         |> runBlock func.Statements
-        |> (fun _scope -> match _scope.Parent with Some p -> p | None -> failwithf $"somehow the procedure did not have a parent, this exception should never be raised")
+        |> (fun _scope -> match _scope.Parent with Some p -> p | None -> failwithf $"somehow the function {getname ref scope} did not have a parent, this exception should never be raised")
       | Return expr -> { scope with Control = Some (SReturn expr) }
       
 
