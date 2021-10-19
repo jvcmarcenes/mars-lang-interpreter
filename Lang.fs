@@ -164,7 +164,7 @@ module Lang
 
     let followedByEof = followedByL eof "end of file"
 
-    let keywords = ["let"; "loop"; "break"; "continue"; "if"; "else"; "end"; "use"; "function"; "return"] |> List.map skipString |> either
+    let keywords = ["write"; "writeline"; "read"; "readnum"; "let"; "loop"; "break"; "continue"; "if"; "else"; "end"; "use"; "function"; "return"] |> List.map skipString |> either <??> "Keywords"
 
     let empty = nl <?|> followedByEof >>% Empty
     //
@@ -200,7 +200,7 @@ module Lang
     let funcdef = skipString "function" >>. paramlist .>> ws .>>. block |>> FunctionDefinition
 
     let read = stringReturn "read" Read
-    let readnumber = stringReturn "readnumber" ReadNumber
+    let readnum = stringReturn "readnum" ReadNumber
     let random = skipString "random" >>. ws1 >>. expr |>> Random
 
     let symbolref = 
@@ -237,13 +237,13 @@ module Lang
       arrayLiteral <??> "Array Literal"
       mapLiteral <??> "Map Literal"
       funcdef <??> "Function Definition"
-      readnumber <??> nameof readnumber
-      read <??> nameof read
-      random <??> nameof random
+      readnum <??> "Read Number"
+      read <??> "Read"
+      random <??> "Random Generator"
       _use <??> "Use Expression"
       funccall <??> "Function Call"
       symbolaccess <??> "Symbol Reference"
-      group <??> "Parenthesis Grouping"
+      group <??> "Expression Grouping"
     ] .>> ws
 
     let unary op x = Unary (op, x)
@@ -333,7 +333,7 @@ module Lang
     //
 
     // Program parsing
-    let program = ws >>. manyTill (statement .>> (nl <|> followedByEof)) (ws >>. eof)
+    let program = nl >>. manyTill (statement .>> (nl <|> followedByEof)) (ws >>. eof)
 
     let parse path =
       match runParserOnFile program () path Text.Encoding.UTF8 with
