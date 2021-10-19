@@ -56,7 +56,7 @@ module Lang
       | Write of Expression
       | WriteLine of Expression
       // Scope
-      | Definition of Identifier * Expression
+      // | Definition of Identifier * Expression
       | Assignment of AssignmentOperation * SymbolReference * Expression
       | Return of Expression
       // Flow Control
@@ -285,7 +285,7 @@ module Lang
     let writeline = skipString "writeline" >>. ((ws1 >>. expr) <|> empty) |>> WriteLine
     let write = skipString "write" >>. ws1 >>. expr |>> Write
 
-    let definition = skipString "let" >>. ws1 >>. id .>> ws .>>. ((skipChar '=' .>> ws >>. expr) <?|> empty) |>> Definition
+    // let definition = skipString "let" >>. ws1 >>. id .>> ws .>>. ((skipChar '=' .>> ws >>. expr) <?|> empty) |>> Definition
     let assignment = symbolref .>> ws .>>. assignops .>> ws .>>. expr |>> fun ((s, o), e) -> Assignment (o, s, e)
 
     let sleep = skipString "sleep" >>. ws1 >>. numLiteral |>> Sleep
@@ -311,7 +311,7 @@ module Lang
           ret <??> nameof ret
           sleep <??> nameof sleep
           _fail <??> "Fail Command"
-          definition <??> "Symbol Definition"
+          // definition <??> "Symbol Definition"
           _break <??> "Break Command"
           _continue <??> "Continue Command"
           loop <??> "Loop Statement"
@@ -324,7 +324,7 @@ module Lang
     // Module
     // let blockEndBy endp = ws >>. manyTill (statement .>> (nl <|> followedByEof)) (ws >>. endp)
 
-    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill ((ws >>. (definition <?|> comment) .>> ws) .>> (nl <?|> followedByEof)) (ws >>. eof)
+    let moduleParser = skipString "module" >>. ws >>. nl >>. manyTill ((ws >>. (assignment <?|> comment) .>> ws) .>> (nl <?|> followedByEof)) (ws >>. eof)
 
     let parseModule path =
       match runParserOnFile moduleParser () path Text.Encoding.UTF8 with
@@ -512,18 +512,22 @@ module Lang
       | Comment -> scope
       | Write expr -> printf $"{evaluate expr scope}"; scope
       | WriteLine expr -> printfn $"{evaluate expr scope}"; scope
-      | Definition (id, expr) -> scope |> addvar id (evaluate expr scope)
+      // | Definition (id, expr) -> scope |> addvar id (evaluate expr scope)
       | Assignment (op, ref, expr) ->
         let rec update ref value _scope =
           match ref with
-          | VarReference id -> updvar id value _scope
+          | VarReference id -> 
+            if not (hasvar id _scope) then
+              addvar id value _scope
+            else
+              updvar id value _scope
           | ArrayAccess (head, iexpr) -> 
             let index = evaluateToInt iexpr scope
             let arr = dereference head _scope :?> obj list
             match head with
             | VarReference id -> updvar id (List.mapi (fun i o -> if i = index then value else o) arr) _scope
             | ArrayAccess (shead, siexpr) -> update (ArrayAccess (shead, siexpr)) (List.mapi (fun i o -> if i = index then value else o) arr) _scope
-            | RecursiveAccess _ -> failwith "head of array cannot be a recursive access, this exceptioin should never be raised"
+            | RecursiveAccess _ -> failwith "head of array cannot be a recursive access, this exception should never be raised"
           | RecursiveAccess (head, tail) -> 
             match head with
             | VarReference hid -> 
@@ -534,11 +538,11 @@ module Lang
               update hid (update tail value { Parent = None; Self = map; Control = None }).Self _scope
             | RecursiveAccess _ -> failwithf "head of recursive access should not be a recursive access, this exception should never be raised"
         let _value = evaluate expr scope
-        let curvalue = dereference ref scope
         let newvalue =
           match op with
           | Set -> _value
           | PlusEquals ->
+            let curvalue = dereference ref scope
             match curvalue with
             | :? int | :? float | :? string as _c -> addop _c _value
             | :? (obj list) as _c -> 
@@ -554,6 +558,7 @@ module Lang
               else failwithf $"Invalid operator (+=) for type {curvalue.GetType()}"
             | _ -> failwithf $"Invalid operator (+=) for type {curvalue.GetType()}"
           | MinusEquals ->
+            let curvalue = dereference ref scope
             match curvalue with
             | :? int | :? float as _c -> oper<float, float> (-) _c _value
             | :? (obj list) as _c -> 
